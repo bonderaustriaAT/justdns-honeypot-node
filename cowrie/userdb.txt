@@ -1,2 +1,5 @@
-# Deny-all: jeder Login-Versuch schlaegt fehl -> cowrie.login.failed, Quell-IP erfasst.
-*:x:!*
+# Accept-all: jeder Login (beliebiger User, beliebiges Passwort) klappt beim
+# ersten Versuch -> Angreifer landet sofort im Fake-Shell, Nachlade-Kommandos
+# werden mitgeschnitten. Jeder Login wird trotzdem geloggt (cowrie.login.success,
+# Quell-IP + Credentials erfasst, Listing bei Schwelle 1).
+*:x:*
