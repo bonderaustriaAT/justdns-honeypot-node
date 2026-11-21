@@ -1,0 +1,27 @@
+[Unit]
+Description=JustDNS honeypot node web-decoy (HTTP, Docker API, Elasticsearch)
+Documentation=https://github.com/bonderaustriaAT/justdns-honeypot-node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Ports. Drop 80 here (and override WEBDECOY_WEB_PORTS to just 8080) if port 80
+# is already used or forwarded to something else on this host.
+Environment=WEBDECOY_WEB_PORTS=80,8080
+Environment=WEBDECOY_DOCKER_PORT=2375
+Environment=WEBDECOY_ELASTIC_PORT=9200
+Environment=WEBDECOY_BIND=0.0.0.0
+Environment=WEBDECOY_LOG=/var/tmp/webdecoy.log
+ExecStart=/usr/bin/python3 /opt/justdns-webdecoy/webdecoy.py
+Restart=on-failure
+RestartSec=5
+User=cowrie
+Group=cowrie
+# Allows binding 80/443 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+UMask=0022
+
+[Install]
+WantedBy=multi-user.target

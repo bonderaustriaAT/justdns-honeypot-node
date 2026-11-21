@@ -230,6 +230,17 @@ sudo systemctl enable --now justdns-shipper.timer
 
 The shipper only needs the Python standard library, so no extra packages.
 
+The web-decoy runs the same way (stdlib only). If port 80 is taken on the host,
+drop it from `WEBDECOY_WEB_PORTS` in the unit and use 8080 alone:
+
+```bash
+sudo install -D webdecoy/webdecoy.py /opt/justdns-webdecoy/webdecoy.py
+sudo cp webdecoy/systemd/justdns-webdecoy.service /etc/systemd/system/
+# optional: edit the unit, set WEBDECOY_WEB_PORTS=8080 if 80 is in use
+sudo systemctl daemon-reload
+sudo systemctl enable --now justdns-webdecoy.service
+```
+
 To keep a bare-metal node updated by itself, install the native self-update
 timer. It pulls this repo once a day and reinstalls the shipper (Cowrie and
 OpenCanary are upstream and stay untouched):

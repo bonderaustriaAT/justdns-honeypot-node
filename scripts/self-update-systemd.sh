@@ -17,6 +17,7 @@ set -eu
 cd "$(dirname "$0")/.."
 SHIPPER_DIR="${SHIPPER_DIR:-/opt/justdns-shipper}"
 NODEUI_DIR="${NODEUI_DIR:-/opt/justdns-nodeui}"
+WEBDECOY_DIR="${WEBDECOY_DIR:-/opt/justdns-webdecoy}"
 LOCK="/tmp/justdns-selfupdate-native.lock"
 
 log() { echo "[self-update] $*"; }
@@ -47,6 +48,14 @@ if [ -d "$NODEUI_DIR" ]; then
   install -m 0644 nodeui/nodeui.py "$NODEUI_DIR/nodeui.py"
   systemctl restart justdns-nodeui 2>/dev/null || true
   log "nodeui aktualisiert"
+fi
+
+# web-decoy nur, wenn installiert.
+if [ -d "$WEBDECOY_DIR" ]; then
+  python3 -m py_compile webdecoy/webdecoy.py
+  install -m 0644 webdecoy/webdecoy.py "$WEBDECOY_DIR/webdecoy.py"
+  systemctl restart justdns-webdecoy 2>/dev/null || true
+  log "web-decoy aktualisiert"
 fi
 
 # Der Shipper laeuft als oneshot ueber seinen Timer, der naechste Lauf nutzt die
