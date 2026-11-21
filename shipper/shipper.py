@@ -26,16 +26,26 @@ Config (Env ODER Datei via --config, KEY=VALUE je Zeile):
 import argparse
 import glob
 import hashlib
+import ipaddress
 import json
 import os
+import re
 import socket
 import sys
 import urllib.error
 import urllib.request
 
 COWRIE_FAILED = "cowrie.login.failed"
+COWRIE_DL = ("cowrie.session.file_download", "cowrie.session.file_upload")
+COWRIE_CMD = "cowrie.command.input"
 PORT_SVC = {21: "FTP", 23: "TELNET", 80: "HTTP", 3306: "MYSQL",
             3389: "RDP", 5900: "VNC", 2222: "SSH", 22: "SSH"}
+
+# URLs mit Schema aus einer Kommandozeile, plus "nackte" Hosts direkt hinter
+# einem Download-Tool (wget/curl/...), die oft ohne http:// stehen.
+_URL_RE = re.compile(r"(?:https?|ftps?|tftp)://[^\s'\"`;|&>)<]+", re.I)
+_DLCMD_RE = re.compile(r"\b(?:wget|curl|tftp|ftpget|lwp-download|fetch)\b[^\n]*", re.I)
+_HOST_RE = re.compile(r"\b([a-z0-9][a-z0-9.-]{0,252}\.[a-z]{2,24})\b", re.I)
 
 DEFAULTS = {
     "SENSOR_ID": "",
@@ -168,6 +178,69 @@ def parse_webdecoy(line):
     }
 
 
+def _host_from_url(u):
+    """Hostnamen aus einer URL loesen (ohne Schema/Userinfo/Port/Pfad)."""
+    rest = u.split("://", 1)[-1]
+    authority = rest.split("/", 1)[0].split("\\", 1)[0]
+    authority = authority.split("@")[-1].split("?")[0].split("#")[0]
+    if authority.startswith("["):      # IPv6-Literal -> keine Domain
+        return None
+    host = authority.split(":")[0].strip().strip(".").lower()
+    return host or None
+
+
+def _valid_domain(h):
+    """True nur fuer plausible Domainnamen (keine bare IP, gueltige Labels/TLD)."""
+    if not h or "." not in h or len(h) > 253:
+        return False
+    try:
+        ipaddress.ip_address(h)        # bare IPv4/IPv6 gehoeren nicht in die DNS-Liste
+        return False
+    except ValueError:
+        pass
+    labels = h.split(".")
+    if any(not lab or len(lab) > 63 or not re.fullmatch(r"[a-z0-9-]+", lab) for lab in labels):
+        return False
+    tld = labels[-1]
+    return tld.isalpha() and len(tld) >= 2
+
+
+def parse_cowrie_domains(line):
+    """Download-/Nachlade-Domains aus einer Cowrie-Zeile. Gibt eine Liste von
+    Domain-Events zurueck (0..n) oder None. Ein Event:
+    {ts, src_ip, url, domain, command}. uid vergibt read_new_events."""
+    try:
+        e = json.loads(line)
+    except ValueError:
+        return None
+    eid = e.get("eventid")
+    ip = e.get("src_ip") or ""
+    ts = e.get("timestamp")
+    candidates = []                    # (host_or_url, sample_url, command)
+    if eid in COWRIE_DL:
+        u = e.get("url")
+        if u:
+            candidates.append((_host_from_url(u), u, u))
+    elif eid == COWRIE_CMD:
+        inp = e.get("input") or ""
+        for u in _URL_RE.findall(inp):
+            candidates.append((_host_from_url(u), u, inp))
+        for seg in _DLCMD_RE.findall(inp):
+            seg = _URL_RE.sub(" ", seg)        # schon erfasste URLs rausnehmen
+            for h in _HOST_RE.findall(seg):
+                candidates.append((h.lower(), h, inp))
+    else:
+        return None
+    out, seen = [], set()
+    for host, sample, cmd in candidates:
+        if not host or not _valid_domain(host) or host in seen:
+            continue
+        seen.add(host)
+        out.append({"ts": ts, "src_ip": ip, "url": (sample or "")[:512],
+                    "domain": host, "command": (cmd or "")[:600]})
+    return out or None
+
+
 def read_new_events(fpath, start_offset, parser):
     """Ab start_offset lesen, (events, new_offset) zurueckgeben. Bei Truncation
     (Datei kleiner als Offset) von 0 lesen."""
@@ -196,11 +269,14 @@ def read_new_events(fpath, start_offset, parser):
             offset = fh.tell()
             if not text:
                 continue
-            ev = parser(text)
-            if ev is None:
+            res = parser(text)
+            if res is None:
                 continue
-            ev["uid"] = uid_for(fpath, line_start)
-            events.append(ev)
+            items = res if isinstance(res, list) else [res]
+            base = uid_for(fpath, line_start)
+            for idx, ev in enumerate(items):
+                ev["uid"] = base if len(items) == 1 else f"{base}-{idx}"
+                events.append(ev)
     return events, offset
 
 
@@ -238,10 +314,10 @@ def ensure_token(cfg, state):
     return token
 
 
-def post_batch(url, token, events):
+def post_batch(url, token, events, endpoint="/events"):
     body = json.dumps({"events": events}).encode("utf-8")
     req = urllib.request.Request(
-        url.rstrip("/") + "/events", data=body, method="POST",
+        url.rstrip("/") + endpoint, data=body, method="POST",
         headers={"Content-Type": "application/json",
                  "Authorization": f"Bearer {token}"},
     )
@@ -266,12 +342,14 @@ def heartbeat(url, token):
         return False
 
 
-def ship_file(fpath, state, parser, url, token, batch):
-    """Alle neuen Events einer Datei senden. Offset erst nach Erfolg schreiben.
-    Gibt (gesendet, ok) zurueck."""
-    key = file_key(fpath)
-    if key is None:
+def ship_file(fpath, state, parser, url, token, batch, endpoint="/events", state_suffix=""):
+    """Alle neuen Events einer Datei (ein Stream) senden. Offset erst nach Erfolg
+    schreiben. state_suffix trennt mehrere Streams derselben Datei (z.B. Login- und
+    Domain-Events aus cowrie.json) mit je eigenem Offset. Gibt (gesendet, ok)."""
+    base = file_key(fpath)
+    if base is None:
         return 0, True
+    key = base + state_suffix
     start = int(state.get(key, {}).get("offset", 0)) if isinstance(state.get(key), dict) else 0
     events, new_offset = read_new_events(fpath, start, parser)
     if not events:
@@ -281,9 +359,9 @@ def ship_file(fpath, state, parser, url, token, batch):
     for i in range(0, len(events), batch):
         chunk = events[i:i + batch]
         try:
-            res = post_batch(url, token, chunk)
+            res = post_batch(url, token, chunk, endpoint)
         except (urllib.error.URLError, OSError, ValueError) as exc:
-            log(f"POST fehlgeschlagen ({os.path.basename(fpath)}): {exc} - Offset bleibt, Retry naechster Lauf")
+            log(f"POST fehlgeschlagen ({os.path.basename(fpath)}{state_suffix}): {exc} - Offset bleibt, Retry naechster Lauf")
             return sent, False
         sent += res.get("accepted", 0) + res.get("duplicate", 0)
     state[key] = {"path": fpath, "offset": new_offset}
@@ -311,11 +389,18 @@ def main():
     total = 0
     all_ok = True
 
-    jobs = [(cfg["COWRIE_LOG"], parse_cowrie), (cfg["OC_LOG"], parse_opencanary),
-            (cfg["WEBDECOY_LOG"], parse_webdecoy)]
-    for pattern, parser in jobs:
+    # Login-/Credential-Events (IP-zentrisch) -> /events, wie bisher.
+    # Nachlade-Domains aus denselben cowrie.json (eigener Offset :dom) -> /domain-events.
+    jobs = [
+        (cfg["COWRIE_LOG"], parse_cowrie, "/events", ""),
+        (cfg["OC_LOG"], parse_opencanary, "/events", ""),
+        (cfg["WEBDECOY_LOG"], parse_webdecoy, "/events", ""),
+        (cfg["COWRIE_LOG"], parse_cowrie_domains, "/domain-events", ":dom"),
+    ]
+    for pattern, parser, endpoint, suffix in jobs:
         for fpath in sorted(glob.glob(pattern)):
-            sent, ok = ship_file(fpath, state, parser, cfg["INTAKE_URL"], token, batch)
+            sent, ok = ship_file(fpath, state, parser, cfg["INTAKE_URL"], token,
+                                 batch, endpoint, suffix)
             total += sent
             all_ok = all_ok and ok
             if not ok:

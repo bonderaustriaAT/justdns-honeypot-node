@@ -15,8 +15,9 @@ OOM-sicher: nur ein begrenzter Ring aktueller Events im Speicher (NODEUI_FEED),
 die Quell-IP-Zaehler sind gedeckelt (NODEUI_MAX_IPS). Beim ersten Lesen wird
 nur das Ende der Logs angetippt, nie die ganze Datei geladen.
 
-Die Live-Ansicht startet LEER und zeigt nur Events, die ab dem Oeffnen der
-Seite neu ankommen (kein Verlauf).
+Die Seite zeigt alle Angriffe im Ring (neueste zuerst) plus die Nachlade-Versuche
+(wget/curl/Download) mit Kommando und Ziel-Domains. Leer-Start gilt nur fuer die
+Live View im Intake-Dashboard, nicht hier.
 
 Config (Env):
   NODEUI_BIND   Default 0.0.0.0 (aus dem internen Netz erreichbar)
@@ -32,8 +33,10 @@ Config (Env):
 import collections
 import datetime
 import glob
+import ipaddress
 import json
 import os
+import re
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -103,29 +106,86 @@ def parse_webdecoy(line):
             "password": e.get("password", "")}
 
 
+_NL_URL = re.compile(r"(?:https?|ftps?|tftp)://[^\s'\"`;|&>)<]+", re.I)
+_NL_DLCMD = re.compile(r"\b(?:wget|curl|tftp|ftpget|lwp-download|fetch)\b", re.I)
+
+
+def _nl_host(u):
+    rest = u.split("://", 1)[-1]
+    auth = rest.split("/", 1)[0].split("@")[-1].split("?")[0].split("#")[0]
+    if auth.startswith("["):
+        return None
+    h = auth.split(":")[0].strip().strip(".").lower()
+    return h or None
+
+
+def _nl_is_domain(h):
+    if not h or "." not in h:
+        return False
+    try:
+        ipaddress.ip_address(h)
+        return False
+    except ValueError:
+        return True
+
+
+def parse_cowrie_nachlade(line):
+    """Nachlade-Versuche (wget/curl/Download) aus einer Cowrie-Zeile:
+    {ts, src_ip, kind, command, domains}. Zeigt, was der Angreifer ziehen wuerde."""
+    try:
+        e = json.loads(line)
+    except ValueError:
+        return None
+    eid = e.get("eventid")
+    ip = e.get("src_ip")
+    ts = e.get("timestamp")
+    if not ip:
+        return None
+    if eid in ("cowrie.session.file_download", "cowrie.session.file_upload"):
+        u = e.get("url") or ""
+        if not u:
+            return None
+        h = _nl_host(u)
+        return {"ts": ts, "src_ip": ip, "kind": "download", "command": u[:400],
+                "domains": [h] if _nl_is_domain(h) else []}
+    if eid == "cowrie.command.input":
+        inp = e.get("input") or ""
+        if not (_NL_URL.search(inp) or _NL_DLCMD.search(inp)):
+            return None
+        doms = []
+        for u in _NL_URL.findall(inp):
+            h = _nl_host(u)
+            if _nl_is_domain(h) and h not in doms:
+                doms.append(h)
+        return {"ts": ts, "src_ip": ip, "kind": "cmd", "command": inp[:400], "domains": doms}
+    return None
+
+
 class State:
     """Geteilter Zustand, unter einem Lock aktualisiert."""
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.offsets = {}                         # path -> byte-offset
+        self.offsets = {}                         # tag:path -> byte-offset
         self.feed = collections.deque(maxlen=FEED_MAX)
+        self.nachlade = collections.deque(maxlen=200)   # Download-/wget-Versuche
         self.ip_counts = {}                       # ip -> [count, last_ts]
         self.events_total = 0
         self.since = None
 
-    def _read_file(self, fpath, parser):
+    def _read_file(self, fpath, parser, sink, tag):
+        key = tag + ":" + fpath
         try:
             size = os.path.getsize(fpath)
         except OSError:
             return
-        first = fpath not in self.offsets
+        first = key not in self.offsets
         # Erstes Lesen: nur das Ende antippen (lean, keine Riesendatei laden).
-        offset = self.offsets.get(fpath, max(0, size - TAIL_BYTES))
+        offset = self.offsets.get(key, max(0, size - TAIL_BYTES))
         if size < offset:        # Rotation/Truncation -> von vorne, ohne Ausrichten
             offset, first = 0, False
         if size == offset:
-            self.offsets[fpath] = offset
+            self.offsets[key] = offset
             return
         try:
             with open(fpath, "rb") as fh:
@@ -142,10 +202,13 @@ class State:
                         continue
                     ev = parser(text)
                     if ev is not None:
-                        self._add(ev)
-            self.offsets[fpath] = offset
+                        sink(ev)
+            self.offsets[key] = offset
         except OSError:
             return
+
+    def _add_nachlade(self, ev):
+        self.nachlade.append(ev)
 
     def _add(self, ev):
         self.events_total += 1
@@ -168,7 +231,9 @@ class State:
             for pattern, parser in ((COWRIE_LOG, parse_cowrie), (OC_LOG, parse_opencanary),
                                     (WEBDECOY_LOG, parse_webdecoy)):
                 for fpath in sorted(glob.glob(pattern)):
-                    self._read_file(fpath, parser)
+                    self._read_file(fpath, parser, self._add, "atk")
+            for fpath in sorted(glob.glob(COWRIE_LOG)):
+                self._read_file(fpath, parse_cowrie_nachlade, self._add_nachlade, "nl")
             top = sorted(self.ip_counts.items(), key=lambda kv: kv[1][0], reverse=True)[:20]
             return {
                 "since": self.since,
@@ -176,6 +241,7 @@ class State:
                 "ips_total": len(self.ip_counts),
                 "ips_capped": len(self.ip_counts) >= MAX_IPS,
                 "feed": list(self.feed)[-200:][::-1],   # neueste zuerst
+                "nachlade": list(self.nachlade)[-100:][::-1],
                 "top": [{"ip": ip, "count": v[0], "last_ts": v[1]} for ip, v in top],
             }
 
@@ -247,6 +313,9 @@ INDEX_HTML = """<!doctype html>
   .muted { color:#6b7585; }
   .ip { color:#8cd3ff; cursor:pointer; }
   .flag { float:right; font-size:12px; color:#6b7585; }
+  .dom { display:inline-block; padding:1px 6px; border-radius:8px; font-size:12px;
+         background:#3a2a12; color:#ffcf8c; font-family:ui-monospace,monospace; margin:1px 2px; }
+  td.cmd { white-space:pre-wrap; word-break:break-all; color:#c9d1dc; max-width:620px; }
 </style></head>
 <body>
 <header>
@@ -267,6 +336,11 @@ INDEX_HTML = """<!doctype html>
     <h2>Top sources</h2>
     <table><thead><tr><th>IP</th><th>Attempts</th><th>Last</th></tr></thead>
       <tbody id="top"></tbody></table>
+  </section>
+  <section style="grid-column:1/-1">
+    <h2>Nachlade-Versuche <span class="muted">wget / curl / Download</span></h2>
+    <table><thead><tr><th>Time (UTC)</th><th>Source IP</th><th>Domains</th><th>Command</th></tr></thead>
+      <tbody id="nl"></tbody></table>
   </section>
 </main>
 <script>
@@ -301,6 +375,17 @@ async function tick(){
        + `<td class="mono">${esc(r.username)}</td><td class="mono">${esc(r.password)}</td></tr>`;
   }
   document.getElementById('feed').innerHTML = h || '<tr><td colspan="6" class="muted">Noch keine Angriffe&hellip;</td></tr>';
+
+  let nl = d.nachlade || [];
+  if(filter) nl = nl.filter(r => r.src_ip === filter);
+  let nh = '';
+  for(const r of nl){
+    const doms = (r.domains||[]).map(x=>`<span class="dom">${esc(x)}</span>`).join('') || '<span class="muted">-</span>';
+    nh += `<tr><td class="muted mono">${esc(shortTs(r.ts))}</td>`
+       + `<td class="mono ip" onclick="setFilter('${esc(r.src_ip)}')">${esc(r.src_ip)}</td>`
+       + `<td>${doms}</td><td class="mono cmd">${esc(r.command)}</td></tr>`;
+  }
+  document.getElementById('nl').innerHTML = nh || '<tr><td colspan="4" class="muted">Noch keine Nachlade-Versuche&hellip;</td></tr>';
 
   const top = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,20);
   let t = '';
