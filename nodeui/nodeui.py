@@ -15,9 +15,10 @@ OOM-sicher: nur ein begrenzter Ring aktueller Events im Speicher (NODEUI_FEED),
 die Quell-IP-Zaehler sind gedeckelt (NODEUI_MAX_IPS). Beim ersten Lesen wird
 nur das Ende der Logs angetippt, nie die ganze Datei geladen.
 
-Die Seite zeigt alle Angriffe im Ring (neueste zuerst) plus die Nachlade-Versuche
-(wget/curl/Download) mit Kommando und Ziel-Domains. Leer-Start gilt nur fuer die
-Live View im Intake-Dashboard, nicht hier.
+Oberflaeche: SOC-Console (dark). KPI-Leiste, Live-Angriffe mit Status (Shell /
+Probe), Shell-Aktivitaet als Terminal-Stream, Nachlade-Versuche und Top-Quellen.
+Klick auf eine IP filtert alle Panels auf diese Quelle. Leer-Start gilt nur fuer
+die Live View im Intake-Dashboard, nicht hier.
 
 Config (Env):
   NODEUI_BIND   Default 0.0.0.0 (aus dem internen Netz erreichbar)
@@ -319,68 +320,149 @@ class Handler(BaseHTTPRequestHandler):
 
 
 INDEX_HTML = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
+<html lang="de"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>JustDNS Honeypot Node</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  :root { color-scheme: dark; }
-  body { font: 14px/1.5 system-ui, sans-serif; margin:0; background:#0f1115; color:#d7dce3; }
-  header { padding:14px 18px; background:#161a21; border-bottom:1px solid #262c36;
-           display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
-  h1 { font-size:16px; margin:0; }
-  .stat { color:#8893a4; font-size:13px; }
-  .stat b { color:#d7dce3; }
-  main { padding:18px; display:grid; gap:18px; grid-template-columns: 1fr; max-width:1200px; }
-  @media (min-width:900px){ main { grid-template-columns: 2fr 1fr; } }
-  h2 { font-size:14px; color:#8893a4; margin:0 0 8px; font-weight:600; }
-  table { border-collapse:collapse; width:100%; }
-  th, td { text-align:left; padding:5px 9px; border-bottom:1px solid #222832; vertical-align:top; }
-  th { color:#8893a4; font-weight:600; }
-  tr:hover td { background:#171c24; }
-  .mono { font-family: ui-monospace, monospace; font-size:13px; }
-  .svc { padding:1px 7px; border-radius:10px; font-size:12px; background:#11405a; color:#8cd3ff; }
-  .in { padding:1px 7px; border-radius:10px; font-size:11px; background:#1d3a24; color:#8fe3a2; margin-left:4px; }
-  .muted { color:#6b7585; }
-  .ip { color:#8cd3ff; cursor:pointer; }
-  .flag { float:right; font-size:12px; color:#6b7585; }
-  .dom { display:inline-block; padding:1px 6px; border-radius:8px; font-size:12px;
-         background:#3a2a12; color:#ffcf8c; font-family:ui-monospace,monospace; margin:1px 2px; }
-  td.cmd { white-space:pre-wrap; word-break:break-all; color:#c9d1dc; max-width:620px; }
+:root{
+  --bg:#0a0d12; --panel:#10151d; --panel2:#0d1219; --line:#1e2733; --line2:#2a3542;
+  --ink:#dfe6ef; --mut:#8695a8; --dim:#7e8ca0;
+  --red:#ff5d6c; --redbg:#2a1217; --amber:#f5b445; --amberbg:#2a2111; --green:#5fdd97; --greenbg:#102418; --blue:#6cc7ff;
+  --mono:"IBM Plex Mono",ui-monospace,monospace; --sans:"IBM Plex Sans",system-ui,sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font:14px/1.45 var(--sans);display:grid;grid-template-columns:210px 1fr;overflow:hidden}
+::selection{background:#24415a;color:#fff}
+::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:#223040;border-radius:6px}::-webkit-scrollbar-thumb:hover{background:#2c3e50}::-webkit-scrollbar-track{background:transparent}
+a,button{color:inherit}
+:focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:4px}
+.tnum{font-variant-numeric:tabular-nums}
+.mono{font-family:var(--mono)}
+/* rail */
+aside{background:var(--panel2);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 0;min-height:0}
+.brand{display:flex;align-items:center;gap:9px;padding:4px 16px 16px;border-bottom:1px solid var(--line)}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px var(--greenbg);flex:0 0 auto}
+.brand b{font-size:14px;letter-spacing:-.01em}.brand span{color:var(--dim);font:12px/1.3 var(--mono)}
+nav{padding:10px 8px;display:flex;flex-direction:column;gap:2px}
+.nav{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:7px;color:var(--mut);text-decoration:none;font-weight:500;width:100%;background:none;border:0;text-align:left;cursor:pointer;font-size:14px}
+.nav.on{background:#13202e;color:var(--ink)}.nav:hover:not(.on){background:#0f1620;color:var(--ink)}
+.nav i{width:7px;height:7px;border-radius:2px;background:currentColor;opacity:.75;flex:0 0 auto}
+.nav .ct{margin-left:auto;font:12px/1 var(--mono);color:var(--dim)}
+.rail-foot{margin-top:auto;padding:12px 16px;border-top:1px solid var(--line);color:var(--dim);font:12px/1.6 var(--mono)}
+.rail-foot b{color:var(--green);font-weight:500}
+/* main */
+main{display:flex;flex-direction:column;min-width:0;overflow:hidden}
+.top{display:flex;align-items:center;gap:18px;padding:12px 20px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#0e141c,#0a0d12)}
+.top h1{font-size:15px;margin:0;font-weight:600}
+.kpi{display:flex;gap:10px;margin-left:auto;flex-wrap:wrap}
+.k{min-width:96px;padding:7px 12px;border:1px solid var(--line);border-radius:9px;background:var(--panel)}
+.k .n{font:600 20px/1 var(--mono);letter-spacing:-.02em}.k .l{color:var(--mut);font-size:12px;margin-top:3px;text-transform:uppercase;letter-spacing:.06em}
+.k.red .n{color:var(--red)}.k.amber .n{color:var(--amber)}.k.green .n{color:var(--green)}
+.grid{flex:1;display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);grid-template-rows:minmax(0,1.5fr) minmax(0,1fr);gap:12px;padding:12px 20px 20px;min-height:0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.ch{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line);flex:0 0 auto}
+.ch h2{font-size:12px;letter-spacing:.07em;text-transform:uppercase;color:var(--mut);margin:0;font-weight:600}
+.ch .sub{color:var(--dim);font:12px/1 var(--mono)}
+.ch .live{margin-left:auto;display:flex;align-items:center;gap:6px;color:var(--green);font:12px/1 var(--mono)}
+.ch .live i{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 1.6s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+.scroll{overflow:auto;min-height:0}
+table{width:100%;border-collapse:collapse;font-size:13px}
+thead th{position:sticky;top:0;background:#0f1620;color:var(--dim);text-align:left;font-weight:600;font-size:12px;letter-spacing:.05em;text-transform:uppercase;padding:7px 14px;border-bottom:1px solid var(--line);z-index:1}
+tbody td{padding:7px 14px;border-bottom:1px solid #161e28;white-space:nowrap;vertical-align:top}
+tbody tr:hover td{background:#121a24}
+.ip{color:var(--blue);font-family:var(--mono);cursor:pointer}
+.ip:hover{text-decoration:underline}
+.tag{display:inline-block;padding:1px 7px;border-radius:999px;font:500 12px/1.5 var(--mono)}
+.tag.ssh{background:#10263a;color:#7fc5ff}.tag.tel{background:#2a1f33;color:#d39bff}
+.tag.http{background:#13303a;color:#7fe0de}.tag.oth{background:#1d2530;color:var(--mut)}
+.st{display:inline-flex;align-items:center;gap:6px;font-size:12px}
+.st i{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+.st.breach i{background:var(--red);box-shadow:0 0 0 3px var(--redbg)}.st.breach{color:var(--red)}
+.st.probe i{background:var(--amber)}.st.probe{color:var(--amber)}
+.cred{color:var(--ink);font-family:var(--mono)}.cred .pw{color:var(--mut)}
+.muted{color:var(--dim)}
+/* shell terminal */
+.term{background:#070a0e;font-family:var(--mono);font-size:13px;line-height:1.7;padding:10px 14px;overflow:auto;min-height:0}
+.term .ln{display:flex;gap:10px;white-space:pre-wrap;word-break:break-all}
+.term .t{color:var(--dim);flex:0 0 auto}.term .who{color:var(--blue)}.term .pr{color:var(--green);flex:0 0 auto}.term .cmd{color:#e7edf4}
+.term .cmd .bb{color:var(--amber)}.term .cmd .dl{color:var(--red)}
+.term .cursor{display:inline-block;width:7px;height:14px;background:var(--green);vertical-align:-2px;animation:pulse 1.1s steps(2) infinite}
+.dom{display:inline-block;padding:0 6px;border-radius:6px;background:var(--amberbg);color:var(--amber);font-family:var(--mono);font-size:12px;margin:1px 4px 1px 0}
+td.cmd{white-space:pre-wrap;word-break:break-all;color:#c9d1dc;font-family:var(--mono);max-width:560px}
+td.cmd .bb{color:var(--amber)}td.cmd .dl{color:var(--red)}
+/* bars */
+.bars{padding:12px 14px;display:flex;flex-direction:column;gap:12px;overflow:auto;min-height:0}
+.brow .hd{display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px}
+.brow .hd .c{font-family:var(--mono);color:var(--mut)}
+.bar{height:6px;border-radius:4px;background:#17202b;overflow:hidden}.bar i{display:block;height:100%;background:linear-gradient(90deg,#ff5d6c,#f5b445)}
+.chip{font:500 12px/1 var(--mono);color:var(--amber);background:var(--amberbg);border:1px solid #3a2e14;border-radius:999px;padding:4px 9px;display:inline-flex;align-items:center;gap:7px;cursor:pointer}
+.chip b{color:var(--ink);font-weight:500}.chip .x{color:var(--mut)}
+.empty{padding:22px 14px;color:var(--dim);font-size:13px}
+@media(max-width:1100px){.grid{grid-template-columns:1fr;grid-auto-rows:minmax(220px,38vh);grid-template-rows:none}}
+@media(max-width:720px){body{grid-template-columns:1fr}aside{display:none}.kpi .l{display:none}.k{min-width:0;padding:6px 10px}}
 </style></head>
 <body>
-<header>
-  <h1>JustDNS Honeypot Node</h1>
-  <span class="stat">Angriffe <b id="ev">0</b></span>
-  <span class="stat">Quellen <b id="ips">0</b></span>
-  <span class="stat">Letzter <b id="since">-</b></span>
-  <span class="flag">live &middot; 3s</span>
-</header>
+<!-- DIRECTION A: SOC CONSOLE (impeccable, operate mode)
+ THESIS: a security operations console; every attacker event prioritized and status-coded so the operator scans, not reads. Refuses the four-equal-tables scroll of the old page.
+ OWN-WORLD: near-black cockpit, cool slate panels, one signal palette (red Shell / amber Probe / green listed), IBM Plex Sans + Plex Mono for all data, hairline grid, sticky heads, themed scrollbars + selection.
+ STORY: operator scans the KPI rail, sees who breached, drills the live shell stream, clicks any IP to filter every panel to one source.
+ FIRST VIEWPORT: left rail nav + counts; top KPI strip; main grid = Live-Angriffe (left) + Shell-Aktivitaet terminal (right), Nachlade + Top-Quellen below.
+ FORM: ops console. code-led, data-driven from /api/overview.
+ FINISH: shipped nodeui UI. -->
+<aside>
+  <div class="brand"><span class="dot"></span><div><b>JustDNS</b><br><span>honeypot&nbsp;node</span></div></div>
+  <nav>
+    <button class="nav on" onclick="clearFilter()"><i></i>Uebersicht</button>
+    <button class="nav" onclick="scrollTo2('c-feed')"><i style="color:var(--red)"></i>Live-Angriffe <span class="ct" id="nav-ev">0</span></button>
+    <button class="nav" onclick="scrollTo2('c-shell')"><i style="color:#d39bff"></i>Shell-Aktivitaet <span class="ct" id="nav-sh">0</span></button>
+    <button class="nav" onclick="scrollTo2('c-nl')"><i style="color:var(--amber)"></i>Nachlade <span class="ct" id="nav-nl">0</span></button>
+    <button class="nav" onclick="scrollTo2('c-top')"><i style="color:var(--blue)"></i>Top-Quellen <span class="ct" id="nav-ip">0</span></button>
+  </nav>
+  <div class="rail-foot">srv-web-01<br>egress&nbsp;<b>locked</b><br>live&nbsp;&middot;&nbsp;3s</div>
+</aside>
 <main>
-  <section>
-    <h2>Live attacks <span id="filt" class="muted"></span></h2>
-    <table><thead><tr><th>Zeit (Wien)</th><th>Source IP</th><th>Service</th>
-      <th>Port</th><th>Username</th><th>Password</th></tr></thead>
-      <tbody id="feed"></tbody></table>
-  </section>
-  <section>
-    <h2>Top sources</h2>
-    <table><thead><tr><th>IP</th><th>Attempts</th><th>Last</th></tr></thead>
-      <tbody id="top"></tbody></table>
-  </section>
-  <section style="grid-column:1/-1">
-    <h2>Nachlade-Versuche <span class="muted">wget / curl / Download</span></h2>
-    <table><thead><tr><th>Zeit (Wien)</th><th>Source IP</th><th>Domains</th><th>Command</th></tr></thead>
-      <tbody id="nl"></tbody></table>
-  </section>
-  <section style="grid-column:1/-1">
-    <h2>Shell-Aktivit&auml;t <span class="muted">alle Eingaben nach erfolgreichem Login</span></h2>
-    <table><thead><tr><th>Zeit (Wien)</th><th>Source IP</th><th>Proto</th><th>Command</th></tr></thead>
-      <tbody id="shell"></tbody></table>
-  </section>
+  <div class="top">
+    <h1>Uebersicht</h1>
+    <div class="kpi">
+      <div class="k red"><div class="n tnum" id="kp-shell">0</div><div class="l">in Shell</div></div>
+      <div class="k amber"><div class="n tnum" id="kp-ev">0</div><div class="l">Logins</div></div>
+      <div class="k"><div class="n tnum" id="kp-ip">0</div><div class="l">Quellen</div></div>
+      <div class="k green"><div class="n tnum" id="kp-nl">0</div><div class="l">Nachlade</div></div>
+    </div>
+  </div>
+  <div class="grid">
+    <section class="card" id="c-feed">
+      <div class="ch"><h2>Live-Angriffe</h2><span id="filt"></span><span class="live"><i></i>live</span></div>
+      <div class="scroll"><table>
+        <thead><tr><th>Zeit (Wien)</th><th>Status</th><th>Source IP</th><th>Dienst</th><th>Port</th><th>Credentials</th></tr></thead>
+        <tbody id="feed"></tbody></table></div>
+    </section>
+    <section class="card" id="c-shell">
+      <div class="ch"><h2>Shell-Aktivitaet</h2><span class="sub" id="shell-sub">&middot; alle Quellen</span><span class="live"><i></i>live</span></div>
+      <div class="term scroll" id="shell"></div>
+    </section>
+    <section class="card" id="c-nl">
+      <div class="ch"><h2>Nachlade-Versuche</h2><span class="sub">wget / curl / Download</span></div>
+      <div class="scroll"><table>
+        <thead><tr><th>Zeit (Wien)</th><th>Source IP</th><th>Ziel</th><th>Command</th></tr></thead>
+        <tbody id="nl"></tbody></table></div>
+    </section>
+    <section class="card" id="c-top">
+      <div class="ch"><h2>Top-Quellen</h2></div>
+      <div class="bars" id="top"></div>
+    </section>
+  </div>
 </main>
 <script>
+const $ = id => document.getElementById(id);
 const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let filter = null;
+
 // Alle ts kommen als UTC (cowrie "...Z", opencanary "YYYY-MM-DD HH:MM:SS").
 // DST-korrekt in Wien-Zeit anzeigen, unabhaengig von der Browser-Zeitzone.
 const VIENNA = new Intl.DateTimeFormat('de-AT', {timeZone:'Europe/Vienna',
@@ -393,67 +475,85 @@ function shortTs(t){
   const d = new Date(s);
   return isNaN(d) ? String(t) : VIENNA.format(d).replace(',', '');
 }
+function svcClass(s){ s=(s||'').toUpperCase(); if(s==='SSH')return 'ssh'; if(s==='TELNET')return 'tel'; if(s==='HTTP')return 'http'; return 'oth'; }
+function hl(cmd){
+  let c = esc(cmd);
+  c = c.replace(/(wget|curl|tftp|ftpget|lwp-download|fetch)/gi,'<span class="dl">$1</span>');
+  c = c.replace(/(busybox)/gi,'<span class="bb">$1</span>');
+  return c;
+}
+function setFilter(ip){ filter = (filter===ip)?null:ip; tick(); }
+function clearFilter(){ filter = null; tick(); }
+function scrollTo2(id){ const el=$(id); if(el) el.scrollIntoView({behavior:'smooth',block:'nearest'}); }
 
-// Node-UI zeigt IMMER alle Angriffe (der komplette Feed, neueste zuerst). Das
-// Leer-Starten gilt nur fuer die Live View im Intake-Dashboard, nicht hier.
 async function tick(){
   let d;
   try { d = await (await fetch('/api/overview')).json(); } catch(e){ return; }
+  const F = r => !filter || r.src_ip === filter;
 
-  const counts = {}, last = {};
-  for(const r of d.feed){
-    counts[r.src_ip] = (counts[r.src_ip]||0) + 1;
-    if(!last[r.src_ip]) last[r.src_ip] = r.ts;   // feed ist neueste zuerst
-  }
-  document.getElementById('ev').textContent = d.events_total;
-  document.getElementById('ips').textContent = Object.keys(counts).length;
-  document.getElementById('since').textContent = d.feed.length ? shortTs(d.feed[0].ts) : '-';
+  // KPIs + Nav
+  const inShell = new Set((d.shell||[]).map(r=>r.src_ip)).size;
+  $('kp-shell').textContent = inShell;
+  $('kp-ev').textContent = d.events_total;
+  $('kp-ip').textContent = d.ips_total;
+  $('kp-nl').textContent = (d.nachlade||[]).length;
+  $('nav-ev').textContent = d.events_total;
+  $('nav-sh').textContent = inShell;
+  $('nav-nl').textContent = (d.nachlade||[]).length;
+  $('nav-ip').textContent = d.ips_total;
 
-  let rows = d.feed;
-  if(filter) rows = rows.filter(r => r.src_ip === filter);
-  document.getElementById('filt').textContent = filter ? ('filtered: '+filter+' (click to clear)') : '';
+  // Filter-Chip
+  $('filt').innerHTML = filter
+    ? `<span class="chip" onclick="clearFilter()" title="Filter aufheben"><b>${esc(filter)}</b><span class="x">&times;</span></span>`
+    : '';
+
+  // Live-Angriffe
   let h = '';
-  for(const r of rows){
+  for(const r of (d.feed||[]).filter(F)){
+    const ok = r.outcome === 'ok';
+    const st = ok ? '<span class="st breach"><i></i>Shell</span>' : '<span class="st probe"><i></i>Probe</span>';
     h += `<tr><td class="muted mono">${esc(shortTs(r.ts))}</td>`
-       + `<td class="mono ip" onclick="setFilter('${esc(r.src_ip)}')">${esc(r.src_ip)}</td>`
-       + `<td><span class="svc">${esc(r.service||'?')}</span>${r.outcome==='ok'?' <span class="in">eingeloggt</span>':''}</td>`
-       + `<td class="muted">${esc(r.dst_port)}</td>`
-       + `<td class="mono">${esc(r.username)}</td><td class="mono">${esc(r.password)}</td></tr>`;
+       + `<td>${st}</td>`
+       + `<td class="ip" onclick="setFilter('${esc(r.src_ip)}')">${esc(r.src_ip)}</td>`
+       + `<td><span class="tag ${svcClass(r.service)}">${esc(r.service||'?')}</span></td>`
+       + `<td class="muted mono">${esc(r.dst_port==null?'':r.dst_port)}</td>`
+       + `<td class="cred">${esc(r.username)||'<span class="pw">-</span>'}<span class="pw"> / ${esc(r.password)||'-'}</span></td></tr>`;
   }
-  document.getElementById('feed').innerHTML = h || '<tr><td colspan="6" class="muted">Noch keine Angriffe&hellip;</td></tr>';
+  $('feed').innerHTML = h || '<tr><td colspan="6" class="empty">Noch keine Angriffe&hellip;</td></tr>';
 
-  let nl = d.nachlade || [];
-  if(filter) nl = nl.filter(r => r.src_ip === filter);
+  // Shell-Aktivitaet (Terminal)
+  const sh = (d.shell||[]).filter(F);
+  $('shell-sub').innerHTML = filter ? ('&middot; '+esc(filter)) : '&middot; alle Quellen';
+  let sx = '';
+  sh.forEach((r,idx)=>{
+    const who = filter ? '' : `<span class="who">${esc(r.src_ip)}</span>`;
+    const cur = idx===0 ? '<span class="cursor"></span>' : '';
+    sx += `<div class="ln"><span class="t">${esc(shortTs(r.ts))}</span>${who}<span class="pr">$</span><span class="cmd">${hl(r.command)} ${cur}</span></div>`;
+  });
+  $('shell').innerHTML = sx || '<div class="empty">Noch keine Shell-Eingaben&hellip; (erscheinen, sobald ein Angreifer eingeloggt ist)</div>';
+
+  // Nachlade
   let nh = '';
-  for(const r of nl){
+  for(const r of (d.nachlade||[]).filter(F)){
     const doms = (r.domains||[]).map(x=>`<span class="dom">${esc(x)}</span>`).join('') || '<span class="muted">-</span>';
     nh += `<tr><td class="muted mono">${esc(shortTs(r.ts))}</td>`
-       + `<td class="mono ip" onclick="setFilter('${esc(r.src_ip)}')">${esc(r.src_ip)}</td>`
-       + `<td>${doms}</td><td class="mono cmd">${esc(r.command)}</td></tr>`;
+       + `<td class="ip" onclick="setFilter('${esc(r.src_ip)}')">${esc(r.src_ip)}</td>`
+       + `<td>${doms}</td><td class="cmd">${hl(r.command)}</td></tr>`;
   }
-  document.getElementById('nl').innerHTML = nh || '<tr><td colspan="4" class="muted">Noch keine Nachlade-Versuche&hellip;</td></tr>';
+  $('nl').innerHTML = nh || '<tr><td colspan="4" class="empty">Noch keine Nachlade-Versuche&hellip;</td></tr>';
 
-  let sh = d.shell || [];
-  if(filter) sh = sh.filter(r => r.src_ip === filter);
-  let sx = '';
-  for(const r of sh){
-    sx += `<tr><td class="muted mono">${esc(shortTs(r.ts))}</td>`
-       + `<td class="mono ip" onclick="setFilter('${esc(r.src_ip)}')">${esc(r.src_ip)}</td>`
-       + `<td><span class="svc">${esc(r.proto||'?')}</span></td>`
-       + `<td class="mono cmd">${esc(r.command)}</td></tr>`;
-  }
-  document.getElementById('shell').innerHTML = sx || '<tr><td colspan="4" class="muted">Noch keine Shell-Eingaben&hellip;</td></tr>';
-
-  const top = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,20);
+  // Top-Quellen (Balken)
+  const top = d.top || [];
+  const max = top.length ? top[0].count : 1;
   let t = '';
-  for(const [ip,count] of top){
-    t += `<tr><td class="mono ip" onclick="setFilter('${esc(ip)}')">${esc(ip)}</td>`
-       + `<td>${count}</td><td class="muted mono">${esc(shortTs(last[ip]))}</td></tr>`;
+  for(const r of top){
+    const w = Math.max(3, Math.round(100*r.count/max));
+    const act = (filter===r.ip) ? ' style="color:var(--ink)"' : '';
+    t += `<div class="brow"><div class="hd"><span class="ip"${act} onclick="setFilter('${esc(r.ip)}')">${esc(r.ip)}</span>`
+       + `<span class="c tnum">${r.count}</span></div><div class="bar"><i style="width:${w}%"></i></div></div>`;
   }
-  document.getElementById('top').innerHTML = t || '<tr><td colspan="3" class="muted">-</td></tr>';
+  $('top').innerHTML = t || '<div class="empty">-</div>';
 }
-function setFilter(ip){ filter = (filter===ip)?null:ip; tick(); }
-document.getElementById('filt').onclick = ()=>{ filter=null; tick(); };
 tick();
 setInterval(tick, 3000);
 </script>
