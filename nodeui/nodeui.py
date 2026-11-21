@@ -6,19 +6,19 @@ lokalen Logs wie der Shipper (cowrie.json + opencanary.log), parst die
 Login-Versuche und zeigt sie als Liste inklusive der probierten Zugangsdaten
 plus die aktivsten Quell-IPs. Nur Standardbibliothek, keine Abhaengigkeiten.
 
-Laeuft rein lokal. Default-Bind 127.0.0.1 -> nur von diesem Host erreichbar.
-WICHTIG: Die Seite zeigt Angreifer-Zugangsdaten. Nicht ungeschuetzt ins
-Internet stellen. Soll sie ueber das Netz erreichbar sein, NODEUI_TOKEN setzen
-und einen Reverse-Proxy mit TLS davor haengen.
+Default-Bind 0.0.0.0 -> aus dem internen Netz erreichbar unter der LAN-Adresse
+des Nodes. WICHTIG: Die Seite zeigt Angreifer-Zugangsdaten. Im internen Netz
+halten, nicht aus dem WAN weiterleiten. Soll sie doch von aussen erreichbar
+sein, NODEUI_TOKEN setzen und einen Reverse-Proxy mit TLS davor haengen.
 
 OOM-sicher: nur ein begrenzter Ring aktueller Events im Speicher (NODEUI_FEED),
 die Quell-IP-Zaehler sind gedeckelt (NODEUI_MAX_IPS). Beim ersten Lesen wird
 nur das Ende der Logs angetippt, nie die ganze Datei geladen.
 
 Config (Env):
-  NODEUI_BIND   Default 127.0.0.1 (im Docker-Container 0.0.0.0, Host mappt lokal)
+  NODEUI_BIND   Default 0.0.0.0 (aus dem internen Netz erreichbar)
   NODEUI_PORT   Default 8080
-  NODEUI_TOKEN  optional, Bearer-Token (leer = kein Token, nur localhost)
+  NODEUI_TOKEN  optional, Bearer-Token (leer = kein Token)
   COWRIE_LOG    Glob, Default /home/cowrie/cowrie/var/log/cowrie/cowrie.json*
   OC_LOG        Glob, Default /var/tmp/opencanary.log*
   NODEUI_FEED   Groesse des Live-Rings, Default 500
@@ -34,7 +34,7 @@ import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-BIND = os.environ.get("NODEUI_BIND", "127.0.0.1")
+BIND = os.environ.get("NODEUI_BIND", "0.0.0.0")
 PORT = int(os.environ.get("NODEUI_PORT", "8080"))
 TOKEN = os.environ.get("NODEUI_TOKEN", "")
 COWRIE_LOG = os.environ.get("COWRIE_LOG", "/home/cowrie/cowrie/var/log/cowrie/cowrie.json*")

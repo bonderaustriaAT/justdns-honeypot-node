@@ -2,15 +2,14 @@
 """JustDNS Fleet-Shipper (Sensor-Seite).
 
 Tailt cowrie.json + opencanary.log, normalisiert zu Events, batcht und POSTet
-sie mit Submission-Token an die Intake-API. At-least-once: Byte-Offsets je
-Logdatei werden erst nach erfolgreichem POST fortgeschrieben; schlaegt der POST
-fehl (Intake offline), bleiben die Offsets stehen und beim naechsten Lauf wird
-alles erneut gesendet. Dedup macht die Zentrale ueber (sensor_id, event_uid).
+sie an die Intake-API. At-least-once: Byte-Offsets je Logdatei werden erst nach
+erfolgreichem POST fortgeschrieben; schlaegt der POST fehl (Intake offline),
+bleiben die Offsets stehen und beim naechsten Lauf wird alles erneut gesendet.
 
 Fremd-Deploy: im Normalfall reicht INTAKE_URL. Ohne TOKEN registriert sich der
-Shipper beim ersten Lauf selbst (POST /register) und legt sein Token im
-STATE_FILE ab. Alternativ TOKEN direkt setzen (eigene/vorab angelegte Nodes).
-Nur Standardbibliothek. Als systemd-Timer/Service ausrollbar.
+Shipper beim ersten Lauf selbst und legt sein Token im STATE_FILE ab.
+Alternativ TOKEN direkt setzen. Nur Standardbibliothek. Als
+systemd-Timer/Service ausrollbar.
 
 Config (Env ODER Datei via --config, KEY=VALUE je Zeile):
   INTAKE_URL   Pflicht, z.B. https://intake.justdns.justfuture.at
@@ -213,7 +212,7 @@ def ensure_token(cfg, state):
         return None
     state["_sensor"] = {"sensor_id": sid, "token": token}
     save_state(cfg["STATE_FILE"], state)
-    log(f"registriert als Sensor {sid} (wartet auf Freigabe in der Zentrale)")
+    log(f"registriert als Sensor {sid}")
     return token
 
 

@@ -5,16 +5,13 @@
 Betreibe einen kleinen Honeypot und hilf dabei, genau die Leute zu blocken, die
 ihn angreifen. Dieses Repo liefert dir einen fertigen Multi-Service-Honeypot
 (Cowrie fuer SSH, dazu OpenCanary fuer FTP, Telnet, HTTP, MySQL, RDP und VNC)
-und einen Shipper, der jeden Versuch an JustDNS meldet. Von dort fliessen die
-Quell-IPs in die oeffentliche Blockliste
+und einen Shipper, der jeden Versuch an JustDNS meldet. Daraus entsteht die
+oeffentliche Blockliste
 [`justdns-threat-ips`](https://github.com/bonderaustriaAT/justdns-threat-ips),
 die jeder zum Filtern bekannter Angreifer nutzen kann.
 
-Dein Node bekommt nie Schreibrechte an der Liste. Er meldet nur, was er sieht,
-und registriert sich beim ersten Start selbst, du musst dich also nirgends
-anmelden. Die Liste selbst wird zentral gepflegt, erst nach Filterung und erst
-nachdem JustDNS deinen Node freigegeben hat. Ein neuer Node kann also von sich
-aus nichts in die oeffentliche Liste schieben.
+Dein Node registriert sich beim ersten Start selbst, du musst dich also nirgends
+anmelden. Er laeuft einfach und meldet, was er sieht.
 
 ## So funktioniert es
 
@@ -26,20 +23,14 @@ aus nichts in die oeffentliche Liste schieben.
   OpenCanary  FTP/Telnet/HTTP/MySQL/RDP/VNC -> opencanary.log
      |
      v
-  Shipper  --HTTPS POST /events (dein Token)-->  JustDNS Intake
-                                                     |
-                                                     v
-                                     zentraler Processor + Filter
-                                                     |
-                                                     v
-                          oeffentliche Liste: justdns-threat-ips
+  Shipper  ------->  JustDNS  ------->  oeffentliche Blockliste: justdns-threat-ips
 ```
 
 Hinter dem Honeypot steckt kein echter Dienst. Jeder Login scheitert mit
 Absicht, dadurch wird jeder Versuch erfasst und der Angreifer kommt nirgendwo
-hin. Der Shipper liest die Logs, buendelt das Neue und schickt es mit deinem
-Token. Ist der Intake mal nicht erreichbar, geht nichts verloren: der Shipper
-macht beim naechsten Lauf da weiter, wo er aufgehoert hat.
+hin. Der Shipper liest die Logs, buendelt das Neue und schickt es an JustDNS.
+Ist JustDNS mal nicht erreichbar, geht nichts verloren: der Shipper macht beim
+naechsten Lauf da weiter, wo er aufgehoert hat.
 
 ## Was dein Node an uns sendet
 
@@ -63,23 +54,11 @@ Fake-Dienst, nicht die echten Zugangsdaten von irgendwem.
 
 Was wir **nicht** bekommen: nichts ueber dich oder deine Maschine. Keine
 Hostnamen, keine Systemdaten, keine Dateiinhalte, keinen Traffic ausser den
-oben genannten Login-Versuchen am Honeypot. Das Token identifiziert deinen Node
-und sonst nichts.
+oben genannten Login-Versuchen am Honeypot.
 
-Noch ein paar Dinge, die du wissen solltest:
-
-- Die IPs deines Nodes werden erst veroeffentlicht, wenn JustDNS deinen Node
-  geprueft und freigegeben hat. Bis dahin wird alles, was dein Node meldet,
-  gespeichert und ist fuer uns sichtbar, aber nichts landet in der oeffentlichen
-  Liste. Genau das verhindert, dass jemand beliebige IPs reindrueckt.
-- Auch nach der Freigabe laufen zentrale Filter, bevor etwas veroeffentlicht
-  wird: bekannte Scanner und Research-Crawler (per Reverse-DNS), grosse geteilte
-  Infrastruktur wie Cloudflare- und Google-Bereiche, Carrier-Grade-NAT und alles
-  auf der Allowlist werden entfernt.
-- Die oeffentliche Liste ist kumulativ. Einmal gelistet, bleibt eine IP
-  gelistet.
-- Das Token deines Nodes ist write-only. Es kann Events melden und sonst nichts,
-  und wir koennen es allein fuer deinen Node jederzeit widerrufen.
+Was damit passiert: die Angreifer-IPs landen in der oeffentlichen Blockliste,
+damit andere sie filtern koennen, und die Zugangsdaten gehen in Abuse-Meldungen
+an die betroffenen Netze.
 
 ## Voraussetzungen
 
@@ -91,17 +70,10 @@ Noch ein paar Dinge, die du wissen solltest:
 
 ## Node registrieren
 
-Es gibt keinen manuellen Token-Schritt. Beim ersten Lauf meldet sich der Shipper
-bei der Intake an, registriert sich und legt sein eigenes write-only Token lokal
-ab (in der State-Datei). Ab da sendet er sofort Angreifer-Daten.
-
-Was er noch nicht tut: irgendetwas veroeffentlichen. Ein frisch registrierter
-Node bleibt so lange im Wartezustand, bis wir ihn freigeben. Sobald wir sehen,
-dass er echten Angreifer-Verkehr meldet, geben wir ihn frei und seine IPs
-fliessen beim naechsten Lauf in die oeffentliche Liste. Wenn du moechtest, dass
-dein Node freigegeben wird, mach ein Issue in diesem Repo auf oder melde dich
-ueber den Kontakt auf der JustDNS-Seite, damit wir wissen, dass er von dir ist,
-und nach ihm schauen.
+Du musst dich nirgends anmelden. Beim ersten Lauf registriert sich der Shipper
+selbst bei JustDNS und sendet sofort. Wenn du moechtest, dass wir wissen, dass
+ein Node von dir ist, mach ein Issue in diesem Repo auf oder melde dich ueber
+den Kontakt auf der JustDNS-Seite.
 
 ## Schnellstart (Docker)
 
@@ -114,8 +86,8 @@ docker compose up -d
 ```
 
 Der erste Lauf baut einmalig das OpenCanary-Image und startet dann Cowrie (SSH
-auf 2222), OpenCanary (die anderen Dienste), den Shipper und die lokale
-Live-Ansicht. Pruefen, ob alles laeuft:
+auf 2222), OpenCanary (die anderen Dienste), den Shipper und die Live-Ansicht.
+Pruefen, ob alles laeuft:
 
 ```bash
 docker compose ps
@@ -169,9 +141,8 @@ docker compose exec cowrie tail -f var/log/cowrie/cowrie.json
 docker compose logs --tail=20 shipper
 ```
 
-Echte Versuche speichert die Intake sofort. Sobald dein Node freigegeben ist,
-erscheinen die Quell-IPs wenige Minuten nach dem naechsten Lauf des zentralen
-Processors in der oeffentlichen Liste.
+Echte Versuche gehen sofort an JustDNS. Die Angreifer-IPs tauchen kurz darauf in
+der oeffentlichen Blockliste auf.
 
 ## Live-Ansicht auf deinem Node
 
@@ -181,20 +152,12 @@ die Benutzernamen und Passwoerter, die die Angreifer probiert haben, mit den
 aktivsten Quellen daneben. Es liest dieselben Logs wie der Shipper und
 aktualisiert sich alle paar Sekunden.
 
-Mit Docker laeuft es bereits. Auf dem Node selbst erreichbar unter
-`http://127.0.0.1:8080`.
+Mit Docker laeuft es bereits und ist aus deinem internen Netz erreichbar unter
+`http://<node-ip>:8080` (die LAN-Adresse des Nodes).
 
-Es ist bewusst nur an localhost gebunden, denn es zeigt Angreifer-Zugangsdaten.
-Um von deinem eigenen Rechner draufzuschauen, tunnle per SSH, statt den Port zu
-oeffnen:
-
-```bash
-ssh -L 8080:127.0.0.1:8080 du@dein-node
-# dann http://127.0.0.1:8080 auf deinem Rechner oeffnen
-```
-
-Wenn du es wirklich uebers Netz erreichbar brauchst, setze `NODEUI_TOKEN` in
-`.env` und haeng einen TLS-Reverse-Proxy davor. Nie offen ins Netz stellen.
+Es zeigt Angreifer-Zugangsdaten, also halte es im internen Netz und leite es
+nicht aus dem WAN weiter. Brauchst du doch Zugriff von aussen, setze
+`NODEUI_TOKEN` in `.env` und haeng einen TLS-Reverse-Proxy davor.
 
 Auf einem nackten Host (systemd) laeuft es wie der Shipper: `nodeui/nodeui.py`
 nach `/opt/justdns-nodeui/` installieren und
@@ -209,7 +172,7 @@ Ab Werk laufen beide Honeypots, `docker compose up -d` deckt also schon ab:
   Standard-Ports.
 
 Jeder Versuch auf einem davon wird gleich protokolliert und gesendet und taucht
-in der lokalen Live-Ansicht auf. Die OpenCanary-Config liegt in
+in der Live-Ansicht auf. Die OpenCanary-Config liegt in
 [`opencanary/opencanary.conf`](opencanary/opencanary.conf); setz
 `device.node_id` auf deinen eigenen Namen, wenn du magst. Einen Dienst
 abschalten: dort sein `*.enabled` auf `false` setzen und seinen Port aus der
@@ -245,8 +208,6 @@ docker compose up -d
 
 - Betreibe das auf einem Host, den du wegwerfen kannst. Es ist ein Koeder, kein
   Dienst, auf den du dich verlaesst.
-- Das Token deines Nodes liegt in der State-Datei des Shippers. Halte sie
-  privat. Wenn es durchsickert, sag Bescheid, dann widerrufen wir es.
 - Lass nichts Echtes auf dem weitergeleiteten Port laufen.
 - Der Honeypot laesst niemanden rein, es gibt also keine Shell zum Ausbrechen,
   trotzdem ist eine isolierte Box gute Praxis.
@@ -257,10 +218,9 @@ docker compose up -d
 docker compose down
 ```
 
-Sag uns Bescheid, wenn du endgueltig aufhoerst, dann entfernen wir deinen Node
-und widerrufen sein Token. Schon beigetragene Daten bleiben in der
-oeffentlichen Liste, da die Liste kumulativ ist und keine persoenlichen Daten
-enthaelt, nur Angreifer-IPs.
+Sag uns Bescheid, wenn du endgueltig aufhoerst. Schon beigetragene Daten bleiben
+in der oeffentlichen Blockliste, es sind nur Angreifer-IPs, nichts
+Persoenliches.
 
 ## Lizenz
 
