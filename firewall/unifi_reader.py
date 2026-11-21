@@ -31,6 +31,7 @@ Config (Env ODER Datei via --config, KEY=VALUE je Zeile):
 """
 
 import argparse
+import datetime
 import json
 import os
 import ssl
@@ -171,6 +172,34 @@ class Unifi:
                     return []
         return []
 
+    def fetch_system_log(self, category="all", pages=6, page_size=100):
+        """UniFi-OS System-Log (POST, paginiert). Deckt alle geblockten Zugriffe
+        ab (ext->int / ext->Gateway), nicht nur IPS. Gibt die Zeilen der ersten
+        `pages` Seiten oder None, wenn der Endpunkt fehlt (klassischer Controller)."""
+        path = f"/proxy/network/v2/api/site/{self.site}/system-log/{category}"
+        rows = []
+        for pg in range(pages):
+            try:
+                status, raw = self._request(
+                    "POST", path, {"pageNumber": pg, "pageSize": page_size})
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    return None
+                raise
+            if status != 200:
+                break
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                break
+            page = data.get("data", []) if isinstance(data, dict) else data
+            if not isinstance(page, list):
+                break
+            rows.extend(page)
+            if len(page) < page_size:
+                break
+        return rows
+
 
 def alarm_to_event(a):
     """Unifi-Alarm -> (uid, event-dict) oder None. src_ip ist Pflicht."""
@@ -187,6 +216,36 @@ def alarm_to_event(a):
     return str(uid), {
         "uid": f"unifi:{uid}",
         "ts": ts if isinstance(ts, str) else None,
+        "src_ip": str(ip),
+        "app": "unifi",
+        "reason": reason,
+        "path": str(sig)[:200] if sig else None,
+        "status_code": None,
+    }
+
+
+def syslog_to_event(row):
+    """UniFi-OS-System-Log-Zeile (nur SECURITY) -> (uid, event) oder None.
+    Erfasst jeden geblockten externen Zugriff; src_ip steckt in parameters.SRC_IP."""
+    if row.get("category") != "SECURITY":
+        return None
+    params = row.get("parameters") or {}
+    src = params.get("SRC_IP")
+    ip = (src.get("name") or src.get("id")) if isinstance(src, dict) else src
+    uid = row.get("id")
+    if not ip or not uid:
+        return None
+    sub = row.get("subcategory") or ""
+    reason = "ips_alert" if "INTRUSION" in sub else "fw_drop"
+    sig = row.get("key") or sub
+    ts = row.get("timestamp")
+    if isinstance(ts, (int, float)):
+        ts = datetime.datetime.utcfromtimestamp(ts / 1000.0).strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        ts = None
+    return str(uid), {
+        "uid": f"unifi:{uid}",
+        "ts": ts,
         "src_ip": str(ip),
         "app": "unifi",
         "reason": reason,
@@ -256,26 +315,35 @@ def main():
         elif not uni.login_password(cfg["UNIFI_USER"], cfg["UNIFI_PASS"]):
             log("Login am Controller fehlgeschlagen.")
             return 1
-        alarms = uni.fetch_alarms()
+        sys_rows = uni.fetch_system_log("all")   # UniFi OS: alle Block-Logs
+        alarms = uni.fetch_alarms()              # klassisch: IPS/IDS
     except (urllib.error.URLError, OSError) as exc:
         log(f"Controller nicht erreichbar: {exc}")
         return 1
 
+    parsed = []
+    for row in (sys_rows or []):
+        p = syslog_to_event(row)
+        if p is not None:
+            parsed.append(p)
+    for a in alarms:
+        p = alarm_to_event(a)
+        if p is not None:
+            parsed.append(p)
+    scanned = len(sys_rows or []) + len(alarms)
+
     state = load_state(cfg["STATE_FILE"])
     seen = set(state.get("seen_ids", []))
-    events, new_ids = [], []
-    for a in alarms:
-        parsed = alarm_to_event(a)
-        if parsed is None:
+    events, new_ids, batch = [], [], set()
+    for raw_id, ev in parsed:
+        if raw_id in seen or raw_id in batch:
             continue
-        raw_id, ev = parsed
-        if raw_id in seen:
-            continue
+        batch.add(raw_id)
         events.append(ev)
         new_ids.append(raw_id)
 
     if not events:
-        log(f"keine neuen Alarme (gesehen: {len(alarms)})")
+        log(f"keine neuen Blocks (gescannt: {scanned})")
         return 0
 
     try:
@@ -288,7 +356,7 @@ def main():
     seen.update(new_ids)
     state["seen_ids"] = list(seen)[-5000:]
     save_state(cfg["STATE_FILE"], state)
-    log(f"gesendet: {len(events)} Alarm(e) (accepted={res.get('accepted')}, "
+    log(f"gesendet: {len(events)} Block(s) (accepted={res.get('accepted')}, "
         f"duplicate={res.get('duplicate')})")
     return 0
 

@@ -1,13 +1,14 @@
 #!/bin/sh
 # JustDNS Fleet-Agent - Installer.
 #
-# Wird vom in der UI generierten Befehl aufgerufen:
-#   curl -fsSL https://intake.example/agent/install | sudo bash -s -- \
+# Wird vom in der Node-UI generierten Befehl aufgerufen:
+#   curl -fsSL http://<node>:8090/agent/install | sudo bash -s -- \
 #       --name <lxc> --app <nginx|caddy|node64|npm|apache|haproxy|sshd|fail2ban> \
-#       --token <submission-token> [--intake-url <url>] [--log-glob <glob>]
+#       [--intake-url <url>] [--log-glob <glob>]
 #
-# Laedt den Agent von der Intake, schreibt Config + systemd-Timer (jede Minute),
-# startet einmal zur Kontrolle. Idempotent: erneuter Lauf aktualisiert nur.
+# Laedt den Agent von der Node, registriert sich selbst (kein Token noetig),
+# schreibt Config + systemd-Timer (jede Minute), startet einmal zur Kontrolle.
+# Idempotent: erneuter Lauf aktualisiert nur.
 set -eu
 
 INTAKE_URL="https://intake.justdns.justfuture.at"
@@ -35,7 +36,6 @@ done
 
 [ "$(id -u)" = "0" ] || die "bitte als root ausfuehren (sudo)."
 [ -n "$APP" ] || die "--app fehlt."
-[ -n "$TOKEN" ] || die "--token fehlt (aus der UI 'Agent hinzufuegen')."
 command -v python3 >/dev/null 2>&1 || die "python3 nicht gefunden."
 command -v systemctl >/dev/null 2>&1 || die "systemd nicht gefunden."
 case "$APP" in
@@ -53,6 +53,24 @@ fetch() {
         die "weder curl noch wget vorhanden."
     fi
 }
+
+if [ -z "$TOKEN" ]; then
+    echo "[install] Registriere Agent an der Node ..."
+    TOKEN=$(python3 - "${INTAKE_URL%/}/agent/register" "$NAME" "$APP" <<'PY'
+import json, sys, urllib.request
+url, host, app = sys.argv[1], sys.argv[2], sys.argv[3]
+body = json.dumps({"host": host, "app": app, "kind": "agent"}).encode()
+req = urllib.request.Request(url, data=body, method="POST",
+                            headers={"Content-Type": "application/json"})
+try:
+    with urllib.request.urlopen(req, timeout=20) as r:
+        sys.stdout.write(json.load(r).get("token", ""))
+except Exception as exc:
+    sys.stderr.write(str(exc) + "\n")
+PY
+)
+    [ -n "$TOKEN" ] || die "Selbst-Registrierung an $INTAKE_URL fehlgeschlagen."
+fi
 
 echo "[install] Agent nach $DEST ..."
 mkdir -p "$DEST" "$STATE_DIR"

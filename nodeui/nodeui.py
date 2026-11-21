@@ -38,8 +38,12 @@ import ipaddress
 import json
 import os
 import re
+import ssl
+import subprocess
 import threading
+import urllib.error
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BIND = os.environ.get("NODEUI_BIND", "0.0.0.0")
@@ -51,8 +55,17 @@ WEBDECOY_LOG = os.environ.get("WEBDECOY_LOG", "/var/tmp/webdecoy.log*")
 FEED_MAX = int(os.environ.get("NODEUI_FEED", "500"))
 MAX_IPS = int(os.environ.get("NODEUI_MAX_IPS", "20000"))
 TAIL_BYTES = 256 * 1024   # beim ersten Lesen nur das Ende antippen
-# Intake, an die ausgerollte Agents und die Firewall-Anbindung melden.
+# Zentrale Intake, an die diese Node die gesammelten Meldungen weiterleitet.
 INTAKE_URL = os.environ.get("NODEUI_INTAKE_URL", "https://intake.justdns.justfuture.at").rstrip("/")
+# Ausgelieferte Sensor-Dateien (install.sh, agent.py, unifi_reader.py).
+DIST = os.environ.get("NODEUI_DIST", "/opt/justdns-nodeui/dist")
+# Firewall-Direktanbindung: von der Node selbst abgefragt. Config liegt in einem
+# fuer den nodeui-Benutzer schreibbaren Verzeichnis (kein root zur Laufzeit noetig);
+# der periodische Timer wird einmal beim Deploy eingerichtet.
+FW_DIR = os.environ.get("NODEUI_FW_DIR", "/var/lib/justdns-firewall")
+UNIFI_CONFIG = os.environ.get("NODEUI_UNIFI_CONFIG", os.path.join(FW_DIR, "unifi.conf"))
+UNIFI_READER = os.environ.get("NODEUI_UNIFI_READER", "/opt/justdns-firewall/unifi_reader.py")
+FW_STATE = os.environ.get("NODEUI_FW_STATE", os.path.join(FW_DIR, "connect.json"))
 
 COWRIE_FAILED = "cowrie.login.failed"
 COWRIE_SUCCESS = "cowrie.login.success"
@@ -281,6 +294,42 @@ class State:
 STATE = State()
 
 
+def _http(url, data=None, headers=None, method=None, timeout=20, ctx=None):
+    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        return resp.status, resp.read()
+
+
+def relay(path, body, auth):
+    """Sensor-Call unveraendert an die zentrale Intake weiterreichen."""
+    headers = {"Content-Type": "application/json"}
+    if auth:
+        headers["Authorization"] = auth
+    return _http(INTAKE_URL + path, data=body, headers=headers, method="POST")
+
+
+def register_firewall(name):
+    """Firewall-Sensor an der Intake anmelden, Token zurueck (ueber Relay)."""
+    body = json.dumps({"host": name, "app": "unifi", "kind": "firewall"}).encode("utf-8")
+    _status, raw = relay("/agent/register", body, None)
+    data = json.loads(raw)
+    return data.get("token"), data.get("sensor_id")
+
+
+def controller_probe(url, site, key, verify):
+    """System-Log des Controllers einmal antippen: prueft Erreichbarkeit + Key."""
+    ctx = None
+    if not verify:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    probe = f"{url}/proxy/network/v2/api/site/{site}/system-log/all"
+    body = json.dumps({"pageNumber": 0, "pageSize": 1}).encode("utf-8")
+    _http(probe, data=body, method="POST", ctx=ctx,
+          headers={"Content-Type": "application/json", "Accept": "application/json",
+                   "X-API-KEY": key})
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "justdns-nodeui"
     protocol_version = "HTTP/1.1"
@@ -313,16 +362,165 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, INDEX_HTML, ctype="text/html; charset=utf-8")
             return
         if path == "/setup":
-            self._send(200, SETUP_HTML.replace("__INTAKE_URL__", INTAKE_URL),
-                       ctype="text/html; charset=utf-8")
+            self._send(200, SETUP_HTML, ctype="text/html; charset=utf-8")
+            return
+        if path == "/agent/install":
+            self._serve_asset("install.sh", rewrite=True,
+                              ctype="text/x-shellscript; charset=utf-8")
+            return
+        if path == "/agent/agent.py":
+            self._serve_asset("justdns-agent.py", ctype="text/x-python; charset=utf-8")
             return
         if path == "/api/overview":
             self._send(200, STATE.poll())
+            return
+        if path == "/api/firewall/status":
+            self._send(200, self._fw_status())
             return
         if path == "/healthz":
             self._send(200, {"status": "ok"})
             return
         self._send(404, {"error": "not_found"})
+
+    def do_POST(self):
+        if not self._auth_ok():
+            self._send(401, {"error": "unauthorized"})
+            return
+        path = urllib.parse.urlparse(self.path).path
+        if path in ("/agent/register", "/agent/events"):
+            self._relay(path)
+            return
+        if path == "/api/firewall/connect":
+            self._fw_connect()
+            return
+        self._send(404, {"error": "not_found"})
+
+    # -- Assets + Relay + Firewall ------------------------------------------
+
+    def _body(self):
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            n = 0
+        return self.rfile.read(n) if n > 0 else b""
+
+    def _node_base(self):
+        host = self.headers.get("Host") or f"127.0.0.1:{PORT}"
+        return "http://" + host
+
+    def _serve_asset(self, fname, rewrite=False, ctype="application/octet-stream"):
+        try:
+            with open(os.path.join(DIST, fname), encoding="utf-8") as fh:
+                txt = fh.read()
+        except OSError:
+            self._send(404, {"error": "asset_not_found", "file": fname})
+            return
+        if rewrite:
+            # Agents laden von DIESER Node und melden an DIESE Node.
+            txt = txt.replace("https://intake.justdns.justfuture.at", self._node_base())
+        self._send(200, txt, ctype=ctype)
+
+    def _relay(self, path):
+        """Sensor-Meldung an die zentrale Intake weiterreichen (transparent)."""
+        try:
+            status, raw = relay(path, self._body(), self.headers.get("Authorization"))
+            self._send(status, raw.decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            self._send(exc.code, exc.read().decode("utf-8", "replace"))
+        except (urllib.error.URLError, OSError) as exc:
+            self._send(502, {"error": "intake_unreachable", "detail": str(exc)[:200]})
+
+    def _fw_status(self):
+        info = {"connected": os.path.exists(UNIFI_CONFIG)}
+        try:
+            with open(FW_STATE, encoding="utf-8") as fh:
+                info.update(json.load(fh))
+        except (OSError, ValueError):
+            pass
+        return info
+
+    def _fw_connect(self):
+        try:
+            d = json.loads(self._body() or b"{}")
+        except ValueError:
+            self._send(400, {"ok": False, "message": "Ungueltige Anfrage."})
+            return
+        url = (d.get("unifi_url") or "").strip().rstrip("/")
+        site = (d.get("site") or "default").strip() or "default"
+        key = (d.get("api_key") or "").strip()
+        verify = bool(d.get("verify_tls", True))
+        if not url or not key:
+            self._send(400, {"ok": False, "message": "Controller-URL und API-Key noetig."})
+            return
+        try:
+            controller_probe(url, site, key, verify)
+        except urllib.error.HTTPError as exc:
+            auth = exc.code in (401, 403)
+            msg = "API-Key abgelehnt." if auth else f"Controller antwortet mit {exc.code}."
+            self._send(200, {"ok": False, "message": msg})
+            return
+        except (urllib.error.URLError, ssl.SSLError, OSError) as exc:
+            self._send(200, {"ok": False,
+                             "message": f"Controller nicht erreichbar: {str(exc)[:160]}"})
+            return
+        name = urllib.parse.urlparse(url).hostname or "unifi"
+        try:
+            token, sid = register_firewall(name)
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            self._send(200, {"ok": False,
+                             "message": f"Anmeldung an der Intake fehlgeschlagen: {str(exc)[:160]}"})
+            return
+        if not token:
+            self._send(200, {"ok": False, "message": "Intake lieferte kein Token."})
+            return
+        try:
+            detail = self._fw_install(url, site, key, verify, name, token, sid)
+        except (OSError, subprocess.SubprocessError) as exc:
+            self._send(200, {"ok": False, "message": f"Einrichtung fehlgeschlagen: {str(exc)[:200]}"})
+            return
+        msg = ("Firewall verbunden. Block-Logs werden jede Minute abgeholt und an die "
+               "Intake gemeldet.")
+        if detail:
+            msg += " " + detail
+        self._send(200, {"ok": True, "sensor_id": sid, "controller": url, "site": site,
+                         "message": msg})
+
+    def _fw_install(self, url, site, key, verify, name, token, sid):
+        """Config schreiben und den Reader einmal sofort laufen lassen. Kein root:
+        der periodische Timer (als nodeui-Benutzer) ist beim Deploy eingerichtet."""
+        state_file = os.path.join(FW_DIR, "unifi-state.json")
+        os.makedirs(FW_DIR, exist_ok=True)
+        conf = (
+            f"INTAKE_URL=http://127.0.0.1:{PORT}\n"
+            f"TOKEN={token}\n"
+            f"UNIFI_URL={url}\n"
+            f"UNIFI_API_KEY={key}\n"
+            "UNIFI_USER=\nUNIFI_PASS=\n"
+            f"UNIFI_SITE={site}\n"
+            f"VERIFY_TLS={'1' if verify else '0'}\n"
+            f"NAME={name}\n"
+            f"STATE_FILE={state_file}\n"
+            "LOOKBACK_MIN=60\n"
+        )
+        fd = os.open(UNIFI_CONFIG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(conf)
+        with open(FW_STATE, "w", encoding="utf-8") as fh:
+            json.dump({"controller": url, "site": site, "sensor_id": sid,
+                       "verify_tls": verify,
+                       "connected_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}, fh)
+        detail = ""
+        if os.path.exists(UNIFI_READER):
+            env = dict(os.environ, UNIFI_CONFIG=UNIFI_CONFIG)
+            try:
+                run = subprocess.run(["/usr/bin/python3", UNIFI_READER], env=env,
+                                     capture_output=True, text=True, timeout=90)
+                lines = [ln for ln in (run.stderr or "").splitlines() if ln.strip()]
+                if lines:
+                    detail = lines[-1].replace("[unifi] ", "")
+            except subprocess.SubprocessError as exc:
+                detail = str(exc)[:160]
+        return detail
 
 
 INDEX_HTML = """<!doctype html>
@@ -582,18 +780,27 @@ input:focus,select:focus{outline:2px solid var(--blue);outline-offset:1px}
 .copy.ok{background:var(--green)}
 .note{color:var(--dim);font-size:12px;margin:10px 0 0}
 .note b{color:var(--amber);font-weight:500}
+.btn{font:600 13px/1 var(--sans);color:var(--bg);background:var(--blue);border:0;border-radius:8px;padding:10px 16px;cursor:pointer}
+.btn:disabled{opacity:.55;cursor:default}
+.btn:hover:not(:disabled){filter:brightness(1.08)}
+.result{margin-top:12px;padding:10px 12px;border-radius:8px;font-size:13px;display:none}
+.result.show{display:block}
+.result.ok{background:#102418;border:1px solid #1e4d33;color:var(--green)}
+.result.err{background:#2a1217;border:1px solid #4d1e24;color:var(--red)}
+.result.wait{background:#11202a;border:1px solid #1e3a4d;color:var(--blue)}
 </style></head>
 <body><div class="wrap">
   <div class="top"><span class="dot"></span><div><b>JustDNS</b> <span>honeypot node</span></div>
     <a class="back" href="/">&larr; Konsole</a></div>
-  <p class="lead">Sensoren an diese Node anbinden. Beide melden abgelehnte Zugriffe an die
-  zentrale Intake; dort werden IPs manuell geprueft und erst dann fuer die Blockliste
-  freigegeben. Private IPs werden nie veroeffentlicht.</p>
+  <p class="lead">Sensoren an diese Node anbinden. Agent und Firewall melden an <b>diese
+  Node</b>; sie sammelt und leitet an die zentrale Intake weiter, wo IPs manuell fuer die
+  Blockliste freigegeben werden. Private IPs werden nie veroeffentlicht.</p>
 
   <div class="card">
     <h2>Agent ausrollen</h2>
     <p class="d">Liest App-Ablehnungen (nginx, Caddy, Node64, NPM, Apache, HAProxy, sshd,
-    fail2ban) und meldet die Quell-IPs. Befehl auf dem Ziel-Host als root ausfuehren.</p>
+    fail2ban) und meldet die Quell-IPs an diese Node. Befehl auf dem Ziel-Host als root
+    ausfuehren.</p>
     <div class="row">
       <div class="f"><label>Host-Name (LXC / VM)</label><input id="ag_name" placeholder="web-02" oninput="buildAgent()"></div>
       <div class="f sm"><label>Anwendung</label><select id="ag_app" onchange="buildAgent()">
@@ -601,50 +808,63 @@ input:focus,select:focus{outline:2px solid var(--blue);outline-offset:1px}
         <option>npm</option><option>haproxy</option><option>sshd</option><option>fail2ban</option></select></div>
     </div>
     <div class="cmd"><code id="ag_cmd"></code><button class="copy" onclick="cp('ag_cmd',this)">Kopieren</button></div>
-    <p class="note">Der Agent erscheint danach in der Intake als <b>ausstehend</b> - erst nach
-    deiner Freigabe fliessen seine oeffentlichen IPs weiter.</p>
+    <p class="note">Kein Token noetig - der Agent registriert sich selbst an dieser Node. Seine
+    oeffentlichen IPs erscheinen danach in der Intake-Review-Queue zur <b>Freigabe</b>.</p>
   </div>
 
   <div class="card">
     <h2>Firewall anbinden (Unifi, nur lesen)</h2>
-    <p class="d">Liest IPS/IDS-Alarme und Firewall-Drops vom Unifi-Controller. Befehl auf
-    einem Host mit Zugriff auf den Controller als root ausfuehren; er fragt den API-Key
-    sicher ab (nicht im Befehl).</p>
+    <p class="d">Diese Node fragt den Unifi-Controller direkt ab und holt <b>alle</b> geblockten
+    externen Zugriffe (ext&rarr;intern / ext&rarr;Gateway), nicht nur IPS/IDS. Nur lesend, keine
+    Aenderung am Controller.</p>
     <div class="row">
-      <div class="f"><label>Controller-URL</label><input id="fw_url" placeholder="https://192.168.1.1" oninput="buildFw()"></div>
-      <div class="f sm"><label>Site</label><input id="fw_site" value="default" oninput="buildFw()"></div>
+      <div class="f"><label>Controller-URL</label><input id="fw_url" placeholder="https://192.168.1.1"></div>
+      <div class="f sm"><label>Site</label><input id="fw_site" value="default"></div>
     </div>
-    <label class="chk"><input type="checkbox" id="fw_tls" onchange="buildFw()"> Selbstsigniertes Controller-Zertifikat (TLS-Pruefung aus)</label>
-    <div class="cmd"><code id="fw_cmd"></code><button class="copy" onclick="cp('fw_cmd',this)">Kopieren</button></div>
+    <div class="row">
+      <div class="f"><label>Read-only API-Key</label><input id="fw_key" type="password" autocomplete="off" placeholder="X-API-KEY"></div>
+    </div>
+    <label class="chk"><input type="checkbox" id="fw_tls" checked> Selbstsigniertes Controller-Zertifikat (TLS-Pruefung aus)</label>
+    <button class="btn" id="fw_btn" onclick="connectFw()">Firewall verbinden</button>
+    <div class="result" id="fw_res"></div>
     <p class="note">Den read-only API-Key bekommst du im Controller unter <b>Settings &rarr;
-    Control Plane &rarr; Integrations</b> (am besten unter einem Viewer-Admin). Der Reader
-    registriert sich selbst und erscheint in der Intake als ausstehend.</p>
+    Control Plane &rarr; Integrations</b> (am besten unter einem Viewer-Admin). Der Key bleibt
+    auf dieser Node und wird nicht an die Intake gesendet.</p>
   </div>
 </div>
 <script>
-const INTAKE = "__INTAKE_URL__";
 const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const dl = '<span class="dl">curl</span>';
-function shq(s){ return "'" + String(s).replace(/'/g,"'\\\\''") + "'"; }
+const $ = id => document.getElementById(id);
 function buildAgent(){
-  const name = (document.getElementById('ag_name').value || 'mein-host').trim();
-  const app = document.getElementById('ag_app').value;
-  const c = `curl -fsSL ${INTAKE}/agent/install | sudo bash -s -- --name ${esc(name)} --app ${esc(app)}`;
-  document.getElementById('ag_cmd').innerHTML = c.replace('curl', dl);
-}
-function buildFw(){
-  const url = (document.getElementById('fw_url').value || 'https://192.168.1.1').trim();
-  const site = (document.getElementById('fw_site').value || 'default').trim();
-  const insec = document.getElementById('fw_tls').checked ? ' --insecure' : '';
-  const c = `curl -fsSL ${INTAKE}/firewall/install | sudo bash -s -- --unifi-url ${esc(url)} --site ${esc(site)}${insec}`;
-  document.getElementById('fw_cmd').innerHTML = c.replace('curl', dl);
+  const name = ($('ag_name').value || 'mein-host').trim();
+  const app = $('ag_app').value;
+  const c = `curl -fsSL ${location.origin}/agent/install | sudo bash -s -- --name ${esc(name)} --app ${esc(app)}`;
+  $('ag_cmd').innerHTML = c.replace('curl', dl);
 }
 function cp(id,btn){
-  const t = document.getElementById(id).textContent;
-  navigator.clipboard.writeText(t).then(()=>{ btn.textContent='Kopiert'; btn.classList.add('ok');
+  navigator.clipboard.writeText($(id).textContent).then(()=>{ btn.textContent='Kopiert'; btn.classList.add('ok');
     setTimeout(()=>{btn.textContent='Kopieren';btn.classList.remove('ok');},1400); });
 }
-buildAgent(); buildFw();
+function res(cls,msg){ const r=$('fw_res'); r.className='result show '+cls; r.innerHTML=msg; }
+async function connectFw(){
+  const url=($('fw_url').value||'').trim();
+  const site=($('fw_site').value||'default').trim();
+  const key=($('fw_key').value||'').trim();
+  const verify=!$('fw_tls').checked;
+  if(!url||!key){ res('err','Controller-URL und API-Key noetig.'); return; }
+  const btn=$('fw_btn'); btn.disabled=true; btn.textContent='Verbinde...';
+  res('wait','Controller wird getestet und die Firewall angemeldet...');
+  try{
+    const r=await fetch('/api/firewall/connect',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({unifi_url:url,site:site,api_key:key,verify_tls:verify})});
+    const d=await r.json();
+    if(d.ok){ res('ok','&#10003; '+esc(d.message)); $('fw_key').value=''; }
+    else res('err','&#10007; '+esc(d.message||'Fehlgeschlagen.'));
+  }catch(e){ res('err','Netzwerkfehler: '+esc(String(e))); }
+  btn.disabled=false; btn.textContent='Firewall verbinden';
+}
+buildAgent();
 </script>
 </body></html>"""
 

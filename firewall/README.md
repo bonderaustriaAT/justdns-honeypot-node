@@ -1,35 +1,45 @@
 # JustDNS Firewall-Reader (Unifi, nur lesen)
 
-Liest IPS/IDS-Alarme und Firewall-Drops vom Unifi-Controller und meldet die
-Quell-IPs an die Fleet-Intake. Nur lesen, keine Aenderung am Controller.
+Die Honeypot-Node fragt den Unifi-Controller direkt ab und holt **alle** geblockten
+externen Zugriffe (ext->intern und ext->Gateway) aus dem UniFi-OS-System-Log
+(Kategorie SECURITY: IPS/IDS und Firewall-Drops), nicht nur IPS. Nur lesend, keine
+Aenderung am Controller. Die Quell-IPs gehen an die Node; sie leitet an die Intake weiter.
 
-Reads IPS/IDS alerts and firewall drops from the Unifi controller and reports the
-source IPs to the Fleet-Intake. Read-only, no change to the controller.
+The honeypot node queries the Unifi controller directly and pulls **all** blocked
+external accesses (ext->internal and ext->gateway) from the UniFi OS system log
+(category SECURITY: IPS/IDS and firewall drops), not just IPS. Read-only, no change to
+the controller. Source IPs go to the node, which forwards them to the Intake.
 
 ---
 
 ## Deutsch
 
-### Einrichten (schnell, aus der Node-UI)
+### Einrichten (aus der Node-UI)
 
-In der Node-UI auf **+ Sensor anbinden** gehen, unter *Firewall anbinden* die
-Controller-URL und Site eintragen und den Befehl auf einem Host mit Zugriff auf
-den Controller als root ausfuehren. Der Installer `install.sh` laedt den Reader
-von der Intake, fragt den API-Key **sicher ab** (nicht im Befehl), schreibt die
-Config und aktiviert den Timer:
+In der Node-UI auf **+ Sensor anbinden** gehen, unter *Firewall anbinden* Controller-URL,
+Site und den read-only API-Key eintragen und **Firewall verbinden** klicken. Die Node
+testet den Controller, meldet die Firewall als Sensor an und holt die Block-Logs danach
+jede Minute. Der API-Key bleibt auf der Node und geht nicht an die Intake.
 
-```
-curl -fsSL https://intake.justdns.justfuture.at/firewall/install | sudo bash -s -- \
-  --unifi-url https://192.168.1.1 --site default [--insecure]
-```
+Selbstsigniertes Controller-Zertifikat im LAN: Haekchen *TLS-Pruefung aus* gesetzt lassen.
 
-`--insecure` setzt `VERIFY_TLS=0` fuer ein selbstsigniertes Controller-Zertifikat.
+### API-Key erzeugen (UniFi OS)
 
-### Einrichten (manuell)
+Auth ist ein UniFi-OS-API-Key (Header `X-API-KEY`). Im Controller:
 
-Alternativ `justdns-unifi.conf.example` nach `/etc/justdns-unifi.conf` kopieren,
-ausfuellen (Auth per **API-Key** oder lokalem Konto, nur lesen) und die Units
-aktivieren:
+1. Controller-Oberflaeche oeffnen (UniFi OS, die Gateway-/Cloud-Key-IP).
+2. **Einstellungen -> Control Plane -> Integrations**, **API-Key erstellen**.
+3. Der Key wird **nur einmal** angezeigt, sofort kopieren.
+
+Nur-lesen: den Key unter einem **Viewer**-Admin (read-only Rolle) erzeugen. Der Reader
+liest ohnehin nur das System-Log.
+
+### Manuell / auf einem anderen Host (optional)
+
+Statt der Direktanbindung kann `unifi_reader.py` auch eigenstaendig laufen:
+`justdns-unifi.conf.example` nach `/etc/justdns-unifi.conf` kopieren, ausfuellen
+(`UNIFI_URL`, `UNIFI_API_KEY`, `UNIFI_SITE`, `INTAKE_URL` auf die Node zeigen) und die
+Units aktivieren:
 
 ```
 install -m 644 systemd/justdns-unifi.service /etc/systemd/system/
@@ -38,60 +48,46 @@ systemctl daemon-reload
 systemctl enable --now justdns-unifi.timer
 ```
 
-Der Reader registriert sich beim ersten Lauf selbst als Firewall-Sensor
-(`kind=firewall`) und muss danach im Dashboard freigegeben werden. Selbstsigniertes
-Controller-Zertifikat im LAN: `VERIFY_TLS=0`.
-
-### API-Key erzeugen (UniFi OS)
-
-Bevorzugte Auth ist ein UniFi-OS-API-Key (Header `X-API-KEY`). Im Controller:
-
-1. Controller-Oberflaeche oeffnen (UniFi OS, die Gateway-/Cloud-Key-IP).
-2. **Einstellungen -> Control Plane -> Integrations** (je nach Version auch oben
-   rechts ueber das Konto-/Admin-Menue), **API-Key erstellen**.
-3. Der Key wird **nur einmal** angezeigt - sofort kopieren und in
-   `UNIFI_API_KEY` eintragen.
-
-Nur-lesen: den Key unter einem **Viewer**-Admin (read-only Rolle) erzeugen, dann
-kann er nichts aendern. Der Reader liest ohnehin nur (`/stat/alarm`). Alternativ
-ein lokales Viewer-Konto als `UNIFI_USER` + `UNIFI_PASS`.
-
 ### Datenschutz
 
-Es werden nur Quell-IP, Grund (`ips_alert`/`fw_drop`) und Signaturname gemeldet.
-Private IPs werden von der Intake markiert und nie veroeffentlicht.
+Gemeldet werden nur Quell-IP, Grund (`ips_alert`/`fw_drop`) und Signaturname. Private IPs
+werden von der Intake markiert und nie veroeffentlicht.
 
 ### Dateien
 
-- `unifi_reader.py` - Reader (stdlib, nur lesen).
-- `install.sh` - Installer, von der Intake unter `/firewall/install` ausgeliefert.
-- `justdns-unifi.conf.example` - Konfigurationsvorlage.
-- `systemd/justdns-unifi.{service,timer}` - Timer-Units.
+- `unifi_reader.py` - Reader (stdlib, nur lesen, System-Log + klassische Alarme).
+- `justdns-unifi.conf.example` - Konfigurationsvorlage fuer den manuellen Betrieb.
+- `systemd/justdns-unifi.{service,timer}` - Timer-Units fuer den manuellen Betrieb.
 
 ---
 
 ## English
 
-### Setup (fast, from the node UI)
+### Setup (from the node UI)
 
-In the node UI open **+ Sensor anbinden**, under *Firewall anbinden* enter the
-controller URL and site, then run the command on a host with access to the
-controller as root. The installer `install.sh` fetches the reader from the Intake,
-asks for the API key **securely** (not in the command), writes the config and
-enables the timer:
+In the node UI open **+ Sensor anbinden**, under *Firewall anbinden* enter the controller
+URL, site and the read-only API key, then click **Firewall verbinden**. The node tests the
+controller, registers the firewall as a sensor and pulls the block logs every minute
+afterwards. The API key stays on the node and is not sent to the Intake.
 
-```
-curl -fsSL https://intake.justdns.justfuture.at/firewall/install | sudo bash -s -- \
-  --unifi-url https://192.168.1.1 --site default [--insecure]
-```
+Self-signed controller certificate on the LAN: leave *TLS-Pruefung aus* checked.
 
-`--insecure` sets `VERIFY_TLS=0` for a self-signed controller certificate.
+### Create an API key (UniFi OS)
 
-### Setup (manual)
+Auth is a UniFi OS API key (header `X-API-KEY`). In the controller:
 
-Alternatively copy `justdns-unifi.conf.example` to `/etc/justdns-unifi.conf` and
-fill it in: auth via **API key** (UniFi OS, recommended) **or** a local account
-(read-only). Then:
+1. Open the controller UI (UniFi OS, the gateway/Cloud Key IP).
+2. **Settings -> Control Plane -> Integrations**, **Create API Key**.
+3. The key is shown **only once**, copy it immediately.
+
+Read-only: create the key under a **Viewer** admin (read-only role). The reader only reads
+the system log anyway.
+
+### Manual / on another host (optional)
+
+Instead of the direct connection, `unifi_reader.py` can run standalone: copy
+`justdns-unifi.conf.example` to `/etc/justdns-unifi.conf`, fill it in (`UNIFI_URL`,
+`UNIFI_API_KEY`, `UNIFI_SITE`, `INTAKE_URL` pointing at the node) and enable the units:
 
 ```
 install -m 644 systemd/justdns-unifi.service /etc/systemd/system/
@@ -100,32 +96,13 @@ systemctl daemon-reload
 systemctl enable --now justdns-unifi.timer
 ```
 
-The reader self-registers as a firewall sensor (`kind=firewall`) on first run and
-must then be approved in the dashboard. Self-signed controller certificate on the
-LAN: `VERIFY_TLS=0`.
-
-### Create an API key (UniFi OS)
-
-Preferred auth is a UniFi OS API key (header `X-API-KEY`). In the controller:
-
-1. Open the controller UI (UniFi OS, the gateway/Cloud Key IP).
-2. **Settings -> Control Plane -> Integrations** (depending on version also via the
-   account/admin menu top right), **Create API Key**.
-3. The key is shown **only once** - copy it immediately and set it in
-   `UNIFI_API_KEY`.
-
-Read-only: create the key under a **Viewer** admin (read-only role) so it cannot
-change anything. The reader only reads anyway (`/stat/alarm`). Alternatively use a
-local Viewer account as `UNIFI_USER` + `UNIFI_PASS`.
-
 ### Privacy
 
-Only source IP, reason (`ips_alert`/`fw_drop`) and signature name are reported.
-Private IPs are flagged by the Intake and never published.
+Only source IP, reason (`ips_alert`/`fw_drop`) and signature name are reported. Private IPs
+are flagged by the Intake and never published.
 
 ### Files
 
-- `unifi_reader.py` - reader (stdlib, read-only).
-- `install.sh` - installer, served by the Intake at `/firewall/install`.
-- `justdns-unifi.conf.example` - configuration template.
-- `systemd/justdns-unifi.{service,timer}` - timer units.
+- `unifi_reader.py` - reader (stdlib, read-only, system log + classic alarms).
+- `justdns-unifi.conf.example` - configuration template for standalone operation.
+- `systemd/justdns-unifi.{service,timer}` - timer units for standalone operation.

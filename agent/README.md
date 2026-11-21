@@ -24,20 +24,21 @@ Unterstuetzte Profile: `nginx`, `apache`, `caddy`, `node64`, `npm`, `haproxy`,
 
 ### Installieren
 
-Im Dashboard der Intake unter **Agent-Modul -> Agents** Name und App waehlen,
-**Agent anlegen** - der fertige Befehl erscheint. Auf dem Host als root:
+In der Node-UI unter **+ Sensor anbinden -> Agent ausrollen** Name und App waehlen;
+der fertige Befehl erscheint. Auf dem Host als root:
 
 ```
-curl -fsSL https://intake.justdns.justfuture.at/agent/install | sudo bash -s -- \
-  --name web-02 --app nginx --token <token>
+curl -fsSL http://<node>:8090/agent/install | sudo bash -s -- \
+  --name web-02 --app nginx
 ```
 
-Der Installer laedt den Agent, schreibt `/etc/justdns-agent.conf` (0640) und
-installiert einen systemd-Timer (jede Minute). Abweichender Logpfad: `--log-glob`
-anhaengen oder `LOG_GLOB` in der Config setzen.
+Kein Token noetig: der Installer registriert den Agent selbst an der Node, laedt ihn,
+schreibt `/etc/justdns-agent.conf` (0640) und installiert einen systemd-Timer (jede
+Minute). Abweichender Logpfad: `--log-glob` anhaengen oder `LOG_GLOB` in der Config
+setzen. Der Agent meldet an die Node; sie leitet an die zentrale Intake weiter.
 
-Der Agent erscheint im Dashboard als **ausstehend**. Erst nach Freigabe fliessen
-seine oeffentlichen IPs weiter.
+Der Agent erscheint in der Intake-Review-Queue. Erst nach Freigabe fliessen seine
+oeffentlichen IPs weiter.
 
 ### Datenschutz
 
@@ -75,20 +76,21 @@ Supported profiles: `nginx`, `apache`, `caddy`, `node64`, `npm`, `haproxy`,
 
 ### Install
 
-In the Intake dashboard under **Agent-Modul -> Agents**, choose a name and the
-app, then **Agent anlegen** - the ready-made command appears. On the host as root:
+In the node UI under **+ Sensor anbinden -> Agent ausrollen**, choose a name and
+the app; the ready-made command appears. On the host as root:
 
 ```
-curl -fsSL https://intake.justdns.justfuture.at/agent/install | sudo bash -s -- \
-  --name web-02 --app nginx --token <token>
+curl -fsSL http://<node>:8090/agent/install | sudo bash -s -- \
+  --name web-02 --app nginx
 ```
 
-The installer fetches the agent, writes `/etc/justdns-agent.conf` (0640) and
-installs a systemd timer (every minute). Non-default log path: append `--log-glob`
-or set `LOG_GLOB` in the config.
+No token needed: the installer self-registers the agent at the node, fetches it,
+writes `/etc/justdns-agent.conf` (0640) and installs a systemd timer (every minute).
+Non-default log path: append `--log-glob` or set `LOG_GLOB` in the config. The agent
+reports to the node, which forwards to the central Intake.
 
-The agent shows up as **pending** in the dashboard. Only after approval do its
-public IPs flow on.
+The agent shows up in the Intake review queue. Only after approval do its public IPs
+flow on.
 
 ### Privacy
 
