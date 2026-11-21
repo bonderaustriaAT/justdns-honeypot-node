@@ -1,0 +1,2 @@
+# Deny-all: jeder Login-Versuch schlaegt fehl -> cowrie.login.failed, Quell-IP erfasst.
+*:x:!*

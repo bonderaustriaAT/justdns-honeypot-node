@@ -1,0 +1,15 @@
+[Unit]
+Description=JustDNS Fleet-Shipper (Sensor-Logs -> Intake-API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=cowrie
+Group=cowrie
+Environment=SHIPPER_CONFIG=/etc/justdns-shipper.conf
+ExecStart=/usr/bin/python3 /opt/justdns-shipper/shipper.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/justdns-shipper

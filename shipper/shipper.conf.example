@@ -1,0 +1,22 @@
+# JustDNS shipper config for a bare-metal (systemd) node.
+# Copy to /etc/justdns-shipper.conf and fill in. Environment variables of the
+# same name override these values.
+
+# Your node name, as agreed with JustDNS.
+SENSOR_ID = changeme
+
+# The submission token you received. Keep it secret (chmod 600 this file).
+TOKEN = jdhs_changeme
+
+# Where events go. Leave as is unless told otherwise.
+INTAKE_URL = https://intake.justdns.justfuture.at
+
+# Log sources. Adjust the paths to where your honeypots write.
+COWRIE_LOG = /home/cowrie/cowrie/var/log/cowrie/cowrie.json*
+OC_LOG     = /var/tmp/opencanary.log*
+
+# Where the shipper remembers how far it got.
+STATE_FILE = /var/lib/justdns-shipper/state.json
+
+# Events per request.
+BATCH = 500

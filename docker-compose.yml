@@ -1,0 +1,46 @@
+# JustDNS honeypot node: Cowrie SSH honeypot plus the shipper that forwards
+# attacker login attempts to the JustDNS intake. Copy .env.example to .env and
+# fill in SENSOR_ID and TOKEN first.
+#
+#   docker compose up -d
+#
+# Then point external SSH traffic at this host. Either map the honeypot to
+# port 22 on the host (set COWRIE_SSH_PORT=22 in .env, only on a box where
+# port 22 is free), or forward WAN tcp/22 to this host's 2222 on your router.
+
+services:
+  cowrie:
+    image: cowrie/cowrie:latest
+    restart: unless-stopped
+    ports:
+      - "${COWRIE_SSH_PORT:-2222}:2222"
+    volumes:
+      - ./cowrie/cowrie.cfg:/cowrie/cowrie-git/etc/cowrie.cfg:ro
+      - ./cowrie/userdb.txt:/cowrie/cowrie-git/etc/userdb.txt:ro
+      - cowrie-logs:/cowrie/cowrie-git/var/log/cowrie
+
+  shipper:
+    image: python:3.12-slim
+    restart: unless-stopped
+    depends_on:
+      - cowrie
+    environment:
+      SENSOR_ID: ${SENSOR_ID}
+      TOKEN: ${TOKEN}
+      INTAKE_URL: ${INTAKE_URL:-https://intake.justdns.justfuture.at}
+      COWRIE_LOG: /logs/cowrie/cowrie.json*
+      OC_LOG: /logs/opencanary/opencanary.log*
+      STATE_FILE: /state/state.json
+      BATCH: "500"
+      SHIPPER_INTERVAL: "120"
+    volumes:
+      - ./shipper/shipper.py:/app/shipper.py:ro
+      - cowrie-logs:/logs/cowrie:ro
+      - opencanary-logs:/logs/opencanary:ro
+      - shipper-state:/state
+    command: ["sh", "-c", "while true; do python /app/shipper.py --config /dev/null; sleep $$SHIPPER_INTERVAL; done"]
+
+volumes:
+  cowrie-logs:
+  opencanary-logs:
+  shipper-state:

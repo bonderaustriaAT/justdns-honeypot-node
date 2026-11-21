@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+# never commit local logs or shipper state
+state.json
+*.log
+data/
