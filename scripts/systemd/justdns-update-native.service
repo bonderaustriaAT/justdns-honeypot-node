@@ -1,0 +1,12 @@
+[Unit]
+Description=JustDNS honeypot node self-update (bare-metal, git pull + reinstall shipper)
+Documentation=https://github.com/bonderaustriaAT/justdns-honeypot-node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Path to your clone. Change this if you cloned the repo somewhere else.
+WorkingDirectory=/opt/justdns-honeypot-node
+ExecStart=/opt/justdns-honeypot-node/scripts/self-update-systemd.sh
+TimeoutStartSec=300

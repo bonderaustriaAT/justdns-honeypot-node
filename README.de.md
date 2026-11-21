@@ -202,6 +202,16 @@ sudo systemctl enable --now justdns-shipper.timer
 
 Der Shipper braucht nur die Python-Standardbibliothek, also keine extra Pakete.
 
+Damit sich eine bare-metal-Node selbst aktualisiert, den nativen Self-Update-Timer
+installieren. Er holt dieses Repo einmal am Tag und spielt den Shipper neu ein
+(Cowrie und OpenCanary sind Upstream und bleiben unangetastet):
+
+```bash
+sudo cp scripts/systemd/justdns-update-native.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now justdns-update-native.timer
+```
+
 ## Aktualisieren
 
 Von Hand, aus dem Repo-Verzeichnis:
