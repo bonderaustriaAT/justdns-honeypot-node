@@ -146,6 +146,31 @@ Real attempts are stored by the intake right away. Once your node has been
 approved, the source IPs appear in the public list a few minutes after the
 central processor runs.
 
+## Live view on your node
+
+The stack also runs a small local dashboard that shows the attacks on your own
+node in real time: source IPs, the service that was hit, and the usernames and
+passwords the attackers tried, with the busiest sources listed on the side. It
+reads the same logs as the shipper and refreshes every few seconds.
+
+With Docker it is already running. Open it on the node itself at
+`http://127.0.0.1:8080`.
+
+It is bound to localhost on purpose, because it shows attacker credentials. To
+look at it from your own machine, tunnel over SSH instead of opening the port:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 you@your-node
+# then open http://127.0.0.1:8080 on your machine
+```
+
+If you really need it reachable over the network, set `NODEUI_TOKEN` in `.env`
+and put a TLS reverse proxy in front. Do not expose it in the clear.
+
+On a bare host (systemd) run it the same way as the shipper: install
+`nodeui/nodeui.py` to `/opt/justdns-nodeui/` and enable
+`nodeui/systemd/justdns-nodeui.service`.
+
 ## More services (optional)
 
 Cowrie covers SSH, which is where most of the noise is. If you want FTP,

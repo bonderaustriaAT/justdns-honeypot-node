@@ -152,6 +152,33 @@ Echte Versuche speichert die Intake sofort. Sobald dein Node freigegeben ist,
 erscheinen die Quell-IPs wenige Minuten nach dem naechsten Lauf des zentralen
 Processors in der oeffentlichen Liste.
 
+## Live-Ansicht auf deinem Node
+
+Zum Setup gehoert ein kleines lokales Dashboard, das die Angriffe auf deinen
+eigenen Node in Echtzeit zeigt: Quell-IPs, welcher Dienst getroffen wurde, und
+die Benutzernamen und Passwoerter, die die Angreifer probiert haben, mit den
+aktivsten Quellen daneben. Es liest dieselben Logs wie der Shipper und
+aktualisiert sich alle paar Sekunden.
+
+Mit Docker laeuft es bereits. Auf dem Node selbst erreichbar unter
+`http://127.0.0.1:8080`.
+
+Es ist bewusst nur an localhost gebunden, denn es zeigt Angreifer-Zugangsdaten.
+Um von deinem eigenen Rechner draufzuschauen, tunnle per SSH, statt den Port zu
+oeffnen:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 du@dein-node
+# dann http://127.0.0.1:8080 auf deinem Rechner oeffnen
+```
+
+Wenn du es wirklich uebers Netz erreichbar brauchst, setze `NODEUI_TOKEN` in
+`.env` und haeng einen TLS-Reverse-Proxy davor. Nie offen ins Netz stellen.
+
+Auf einem nackten Host (systemd) laeuft es wie der Shipper: `nodeui/nodeui.py`
+nach `/opt/justdns-nodeui/` installieren und
+`nodeui/systemd/justdns-nodeui.service` aktivieren.
+
 ## Mehr Dienste (optional)
 
 Cowrie deckt SSH ab, wo der meiste Laerm herkommt. Wenn du zusaetzlich FTP,

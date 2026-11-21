@@ -1,0 +1,24 @@
+[Unit]
+Description=JustDNS honeypot node, local live attack view
+After=network.target
+
+[Service]
+Type=simple
+# Localhost only. It shows attacker credentials: do not bind it to a public
+# address without NODEUI_TOKEN and a TLS reverse proxy in front.
+Environment=NODEUI_BIND=127.0.0.1
+Environment=NODEUI_PORT=8080
+Environment=COWRIE_LOG=/home/cowrie/cowrie/var/log/cowrie/cowrie.json*
+Environment=OC_LOG=/var/tmp/opencanary.log*
+# Optional: protect it with a token if you ever expose it.
+# Environment=NODEUI_TOKEN=change-me
+ExecStart=/usr/bin/python3 /opt/justdns-nodeui/nodeui.py
+Restart=on-failure
+RestartSec=5
+User=cowrie
+Group=cowrie
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

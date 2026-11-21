@@ -1,6 +1,7 @@
-# JustDNS honeypot node: Cowrie SSH honeypot plus the shipper that forwards
-# attacker login attempts to the JustDNS intake. Copy .env.example to .env
-# (no token needed, the shipper self-registers on first run), then:
+# JustDNS honeypot node: Cowrie SSH honeypot, the shipper that forwards attacker
+# login attempts to the JustDNS intake, and a local live view (nodeui, on
+# http://127.0.0.1:8080). Copy .env.example to .env (no token needed, the
+# shipper self-registers on first run), then:
 #
 #   docker compose up -d
 #
@@ -40,6 +41,27 @@ services:
       - opencanary-logs:/logs/opencanary:ro
       - shipper-state:/state
     command: ["sh", "-c", "while true; do python /app/shipper.py --config /dev/null; sleep $$SHIPPER_INTERVAL; done"]
+
+  # Local live view of attacks on THIS node, incl. tried credentials.
+  # Bound to 127.0.0.1 on the host: reachable only from this machine. It shows
+  # attacker credentials, so do not expose it without NODEUI_TOKEN and TLS.
+  nodeui:
+    image: python:3.12-slim
+    restart: unless-stopped
+    depends_on:
+      - cowrie
+    environment:
+      NODEUI_BIND: 0.0.0.0
+      NODEUI_TOKEN: ${NODEUI_TOKEN:-}
+      COWRIE_LOG: /logs/cowrie/cowrie.json*
+      OC_LOG: /logs/opencanary/opencanary.log*
+    volumes:
+      - ./nodeui/nodeui.py:/app/nodeui.py:ro
+      - cowrie-logs:/logs/cowrie:ro
+      - opencanary-logs:/logs/opencanary:ro
+    ports:
+      - "127.0.0.1:${NODEUI_PORT:-8080}:8080"
+    command: ["python", "/app/nodeui.py"]
 
 volumes:
   cowrie-logs:
