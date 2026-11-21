@@ -330,6 +330,90 @@ def controller_probe(url, site, key, verify):
                    "X-API-KEY": key})
 
 
+def _now():
+    return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class SensorLog:
+    """Protokoll der an dieser Node angebundenen Agents/Firewalls und ihrer
+    Meldungen. Schreibt mit, was die Node an die Intake weiterreicht. Begrenzt
+    (OOM-sicher); die Sensor-Liste wird fuer Neustarts persistiert."""
+
+    def __init__(self, path):
+        self.lock = threading.Lock()
+        self.path = path
+        self.sensors = {}                        # sensor_id -> info
+        self.by_token = {}                       # token -> sensor_id
+        self.feed = collections.deque(maxlen=500)
+        self._load()
+
+    def _load(self):
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                d = json.load(fh)
+            self.sensors = d.get("sensors", {})
+            self.by_token = d.get("by_token", {})
+        except (OSError, ValueError):
+            pass
+
+    def _save(self):
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"sensors": self.sensors, "by_token": self.by_token}, fh)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def register(self, req, resp):
+        sid = resp.get("sensor_id")
+        if not sid:
+            return
+        now = _now()
+        with self.lock:
+            s = self.sensors.get(sid) or {"sensor_id": sid, "first_ts": now, "count": 0}
+            s["kind"] = req.get("kind") or s.get("kind") or "agent"
+            s["app"] = req.get("app") or s.get("app") or ""
+            s["host"] = req.get("host") or s.get("host") or ""
+            s["last_ts"] = now
+            self.sensors[sid] = s
+            tok = resp.get("token")
+            if tok:
+                self.by_token[tok] = sid
+            if len(self.sensors) > 500:
+                old = min(self.sensors.values(), key=lambda x: x.get("last_ts", ""))
+                self.sensors.pop(old["sensor_id"], None)
+            self._save()
+
+    def events(self, token, events):
+        if not events:
+            return
+        now = _now()
+        with self.lock:
+            sid = self.by_token.get(token or "")
+            s = self.sensors.get(sid) if sid else None
+            label = (s.get("host") or s.get("app")) if s else "?"
+            kind = s.get("kind") if s else "agent"
+            for ev in events:
+                self.feed.append({"ts": ev.get("ts") or now, "sensor": label, "kind": kind,
+                                  "src_ip": ev.get("src_ip"), "reason": ev.get("reason"),
+                                  "app": ev.get("app")})
+            if s:
+                s["last_ts"] = now
+                s["count"] = s.get("count", 0) + len(events)
+                self._save()
+
+    def view(self):
+        with self.lock:
+            sensors = sorted(self.sensors.values(),
+                             key=lambda x: x.get("last_ts", ""), reverse=True)
+            return {"sensors": sensors, "feed": list(self.feed)[-200:][::-1]}
+
+
+SENSORS = SensorLog(os.path.join(FW_DIR, "sensors.json"))
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "justdns-nodeui"
     protocol_version = "HTTP/1.1"
@@ -363,6 +447,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/setup":
             self._send(200, SETUP_HTML, ctype="text/html; charset=utf-8")
+            return
+        if path == "/sensors":
+            self._send(200, SENSORS_HTML, ctype="text/html; charset=utf-8")
+            return
+        if path == "/api/sensors":
+            self._send(200, SENSORS.view())
             return
         if path == "/agent/install":
             self._serve_asset("install.sh", rewrite=True,
@@ -421,14 +511,28 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, txt, ctype=ctype)
 
     def _relay(self, path):
-        """Sensor-Meldung an die zentrale Intake weiterreichen (transparent)."""
+        """Sensor-Meldung an die zentrale Intake weiterreichen (transparent) und
+        fuers lokale Protokoll mitschreiben."""
+        body = self._body()
+        auth = self.headers.get("Authorization", "")
         try:
-            status, raw = relay(path, self._body(), self.headers.get("Authorization"))
-            self._send(status, raw.decode("utf-8", "replace"))
+            status, raw = relay(path, body, auth or None)
         except urllib.error.HTTPError as exc:
             self._send(exc.code, exc.read().decode("utf-8", "replace"))
+            return
         except (urllib.error.URLError, OSError) as exc:
             self._send(502, {"error": "intake_unreachable", "detail": str(exc)[:200]})
+            return
+        if status < 300:
+            try:
+                if path.endswith("/register"):
+                    SENSORS.register(json.loads(body or b"{}"), json.loads(raw or b"{}"))
+                elif path.endswith("/events"):
+                    tok = auth[7:] if auth.startswith("Bearer ") else ""
+                    SENSORS.events(tok, json.loads(body or b"{}").get("events", []))
+            except (ValueError, AttributeError):
+                pass
+        self._send(status, raw.decode("utf-8", "replace"))
 
     def _fw_status(self):
         info = {"connected": os.path.exists(UNIFI_CONFIG)}
@@ -473,6 +577,8 @@ class Handler(BaseHTTPRequestHandler):
         if not token:
             self._send(200, {"ok": False, "message": "Intake lieferte kein Token."})
             return
+        SENSORS.register({"host": name, "app": "unifi", "kind": "firewall"},
+                         {"token": token, "sensor_id": sid})
         try:
             detail = self._fw_install(url, site, key, verify, name, token, sid)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -618,6 +724,7 @@ td.cmd .bb{color:var(--amber)}td.cmd .dl{color:var(--red)}
   <div class="top">
     <div class="brand"><span class="dot"></span><div><b>JustDNS</b><span>honeypot&nbsp;node</span></div></div>
     <div class="status">srv-web-01 &middot; egress&nbsp;<b>locked</b> &middot; live&nbsp;3s</div>
+    <a class="navlink" href="/sensors">Sensoren</a>
     <a class="navlink" href="/setup">+ Sensor anbinden</a>
     <div class="kpi">
       <div class="k red"><div class="n tnum" id="kp-shell">0</div><div class="l">in Shell</div></div>
@@ -865,6 +972,98 @@ async function connectFw(){
   btn.disabled=false; btn.textContent='Firewall verbinden';
 }
 buildAgent();
+</script>
+</body></html>"""
+
+
+SENSORS_HTML = """<!doctype html>
+<html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JustDNS Node - Sensor-Protokoll</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0a0d12;--panel:#10151d;--line:#1e2733;--line2:#2a3542;--ink:#dfe6ef;--mut:#8695a8;--dim:#7e8ca0;
+--blue:#6cc7ff;--green:#5fdd97;--amber:#f5b445;--red:#ff5d6c;--mono:"IBM Plex Mono",ui-monospace,monospace;--sans:"IBM Plex Sans",system-ui,sans-serif;color-scheme:dark;}
+*{box-sizing:border-box}html,body{margin:0}body{background:var(--bg);color:var(--ink);font:14px/1.5 var(--sans);min-height:100vh}
+a{color:var(--blue);text-decoration:none}
+.wrap{max-width:1040px;margin:0 auto;padding:22px 16px 64px}
+.top{display:flex;align-items:center;gap:12px;padding:4px 0 18px;border-bottom:1px solid var(--line);margin-bottom:22px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px #102418}
+.top b{font-size:15px}.top .sub{color:var(--dim);font:12px/1 var(--mono)}
+.nav{margin-left:auto;display:flex;gap:8px}
+.nav a{font:12px/1 var(--mono);padding:7px 11px;border:1px solid var(--line2);border-radius:8px}
+.nav a:hover{border-color:var(--blue)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin-bottom:18px;overflow:hidden}
+.ch{display:flex;align-items:center;gap:8px;padding:11px 15px;border-bottom:1px solid var(--line)}
+.ch h2{font-size:12px;letter-spacing:.07em;text-transform:uppercase;color:var(--mut);margin:0;font-weight:600}
+.ch .live{margin-left:auto;color:var(--green);font:12px/1 var(--mono)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+thead th{position:sticky;top:0;background:#0f1620;color:var(--dim);text-align:left;font-weight:600;font-size:12px;letter-spacing:.05em;text-transform:uppercase;padding:8px 15px;border-bottom:1px solid var(--line)}
+tbody td{padding:8px 15px;border-bottom:1px solid #161e28;white-space:nowrap}
+tbody tr:hover td{background:#121a24}
+.scroll{max-height:46vh;overflow:auto}
+.ip{color:var(--blue);font-family:var(--mono)}
+.mono{font-family:var(--mono)}.muted{color:var(--dim)}
+.k{display:inline-block;padding:1px 8px;border-radius:999px;font:500 12px/1.6 var(--mono)}
+.k.agent{background:#10263a;color:#7fc5ff}.k.firewall{background:#2a2111;color:var(--amber)}
+.r{display:inline-block;padding:1px 8px;border-radius:999px;font:500 12px/1.6 var(--mono);background:#1d2530;color:var(--mut)}
+.r.ips_alert{background:#2a1217;color:var(--red)}.r.fw_drop{background:#2a2111;color:var(--amber)}
+.empty{padding:22px 15px;color:var(--dim);font-size:13px}
+</style></head>
+<body><div class="wrap">
+  <div class="top"><span class="dot"></span><div><b>JustDNS</b> <span class="sub">honeypot node</span></div>
+    <div class="nav"><a href="/">&larr; Konsole</a><a href="/setup">+ Sensor anbinden</a></div></div>
+
+  <div class="card">
+    <div class="ch"><h2>Angebundene Sensoren</h2><span class="live" id="sc"></span></div>
+    <div class="scroll"><table>
+      <thead><tr><th>Typ</th><th>Host / Quelle</th><th>App</th><th>Sensor-ID</th><th>Meldungen</th><th>Zuletzt (Wien)</th></tr></thead>
+      <tbody id="sensors"></tbody></table></div>
+  </div>
+
+  <div class="card">
+    <div class="ch"><h2>Gemeldete Zugriffe</h2><span class="live"><span id="fc"></span> &middot; live</span></div>
+    <div class="scroll"><table>
+      <thead><tr><th>Zeit (Wien)</th><th>Sensor</th><th>Typ</th><th>Quell-IP</th><th>Grund</th></tr></thead>
+      <tbody id="feed"></tbody></table></div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const VIENNA = new Intl.DateTimeFormat('de-AT',{timeZone:'Europe/Vienna',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+function ts(t){ if(!t)return ''; let s=String(t).trim(); if(/^\\d{4}-\\d{2}-\\d{2} /.test(s))s=s.replace(' ','T'); if(!/[Zz]|[+\\-]\\d{2}:?\\d{2}$/.test(s))s+='Z'; const d=new Date(s); return isNaN(d)?String(t):VIENNA.format(d).replace(',',''); }
+async function tick(){
+  let d; try{ d=await (await fetch('/api/sensors')).json(); }catch(e){ return; }
+  const sens=d.sensors||[];
+  $('sc').textContent = sens.length ? (sens.length+' Sensor'+(sens.length===1?'':'en')) : '';
+  let h='';
+  for(const s of sens){
+    const kind=(s.kind==='firewall')?'firewall':'agent';
+    const kl=(s.kind==='firewall')?'Firewall':'Agent';
+    h+=`<tr><td><span class="k ${kind}">${kl}</span></td>`
+      +`<td class="mono">${esc(s.host)||'<span class="muted">-</span>'}</td>`
+      +`<td class="mono">${esc(s.app)||'<span class="muted">-</span>'}</td>`
+      +`<td class="mono muted">${esc(s.sensor_id)}</td>`
+      +`<td class="mono">${s.count||0}</td>`
+      +`<td class="mono muted">${esc(ts(s.last_ts))}</td></tr>`;
+  }
+  $('sensors').innerHTML = h || '<tr><td colspan="6" class="empty">Noch keine Sensoren angebunden. Unter &bdquo;+ Sensor anbinden&ldquo; einen Agent ausrollen oder die Firewall verbinden.</td></tr>';
+  const feed=d.feed||[];
+  $('fc').textContent = feed.length ? (feed.length+' Meldungen') : '';
+  let f='';
+  for(const r of feed){
+    const rl=esc(r.reason||'');
+    f+=`<tr><td class="mono muted">${esc(ts(r.ts))}</td>`
+      +`<td class="mono">${esc(r.sensor)||'?'}</td>`
+      +`<td><span class="k ${r.kind==='firewall'?'firewall':'agent'}">${r.kind==='firewall'?'Firewall':'Agent'}</span></td>`
+      +`<td class="ip">${esc(r.src_ip)}</td>`
+      +`<td><span class="r ${rl}">${rl||'-'}</span></td></tr>`;
+  }
+  $('feed').innerHTML = f || '<tr><td colspan="5" class="empty">Noch keine gemeldeten Zugriffe.</td></tr>';
+}
+tick(); setInterval(tick,3000);
 </script>
 </body></html>"""
 
