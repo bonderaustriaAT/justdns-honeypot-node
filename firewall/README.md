@@ -10,11 +10,26 @@ source IPs to the Fleet-Intake. Read-only, no change to the controller.
 
 ## Deutsch
 
-### Einrichten
+### Einrichten (schnell, aus der Node-UI)
 
-Auf dem Host (z. B. neben der Intake) `justdns-unifi.conf.example` nach
-`/etc/justdns-unifi.conf` kopieren und ausfuellen: Auth per **API-Key** (UniFi OS,
-empfohlen) **oder** lokalem Konto (nur lesen). Dann:
+In der Node-UI auf **+ Sensor anbinden** gehen, unter *Firewall anbinden* die
+Controller-URL und Site eintragen und den Befehl auf einem Host mit Zugriff auf
+den Controller als root ausfuehren. Der Installer `install.sh` laedt den Reader
+von der Intake, fragt den API-Key **sicher ab** (nicht im Befehl), schreibt die
+Config und aktiviert den Timer:
+
+```
+curl -fsSL https://intake.justdns.justfuture.at/firewall/install | sudo bash -s -- \
+  --unifi-url https://192.168.1.1 --site default [--insecure]
+```
+
+`--insecure` setzt `VERIFY_TLS=0` fuer ein selbstsigniertes Controller-Zertifikat.
+
+### Einrichten (manuell)
+
+Alternativ `justdns-unifi.conf.example` nach `/etc/justdns-unifi.conf` kopieren,
+ausfuellen (Auth per **API-Key** oder lokalem Konto, nur lesen) und die Units
+aktivieren:
 
 ```
 install -m 644 systemd/justdns-unifi.service /etc/systemd/system/
@@ -49,6 +64,7 @@ Private IPs werden von der Intake markiert und nie veroeffentlicht.
 ### Dateien
 
 - `unifi_reader.py` - Reader (stdlib, nur lesen).
+- `install.sh` - Installer, von der Intake unter `/firewall/install` ausgeliefert.
 - `justdns-unifi.conf.example` - Konfigurationsvorlage.
 - `systemd/justdns-unifi.{service,timer}` - Timer-Units.
 
@@ -56,11 +72,26 @@ Private IPs werden von der Intake markiert und nie veroeffentlicht.
 
 ## English
 
-### Setup
+### Setup (fast, from the node UI)
 
-On the host (e.g. next to the Intake), copy `justdns-unifi.conf.example` to
-`/etc/justdns-unifi.conf` and fill it in: auth via **API key** (UniFi OS,
-recommended) **or** a local account (read-only). Then:
+In the node UI open **+ Sensor anbinden**, under *Firewall anbinden* enter the
+controller URL and site, then run the command on a host with access to the
+controller as root. The installer `install.sh` fetches the reader from the Intake,
+asks for the API key **securely** (not in the command), writes the config and
+enables the timer:
+
+```
+curl -fsSL https://intake.justdns.justfuture.at/firewall/install | sudo bash -s -- \
+  --unifi-url https://192.168.1.1 --site default [--insecure]
+```
+
+`--insecure` sets `VERIFY_TLS=0` for a self-signed controller certificate.
+
+### Setup (manual)
+
+Alternatively copy `justdns-unifi.conf.example` to `/etc/justdns-unifi.conf` and
+fill it in: auth via **API key** (UniFi OS, recommended) **or** a local account
+(read-only). Then:
 
 ```
 install -m 644 systemd/justdns-unifi.service /etc/systemd/system/
@@ -95,5 +126,6 @@ Private IPs are flagged by the Intake and never published.
 ### Files
 
 - `unifi_reader.py` - reader (stdlib, read-only).
+- `install.sh` - installer, served by the Intake at `/firewall/install`.
 - `justdns-unifi.conf.example` - configuration template.
 - `systemd/justdns-unifi.{service,timer}` - timer units.

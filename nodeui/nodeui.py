@@ -51,6 +51,8 @@ WEBDECOY_LOG = os.environ.get("WEBDECOY_LOG", "/var/tmp/webdecoy.log*")
 FEED_MAX = int(os.environ.get("NODEUI_FEED", "500"))
 MAX_IPS = int(os.environ.get("NODEUI_MAX_IPS", "20000"))
 TAIL_BYTES = 256 * 1024   # beim ersten Lesen nur das Ende antippen
+# Intake, an die ausgerollte Agents und die Firewall-Anbindung melden.
+INTAKE_URL = os.environ.get("NODEUI_INTAKE_URL", "https://intake.justdns.justfuture.at").rstrip("/")
 
 COWRIE_FAILED = "cowrie.login.failed"
 COWRIE_SUCCESS = "cowrie.login.success"
@@ -310,6 +312,10 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             self._send(200, INDEX_HTML, ctype="text/html; charset=utf-8")
             return
+        if path == "/setup":
+            self._send(200, SETUP_HTML.replace("__INTAKE_URL__", INTAKE_URL),
+                       ctype="text/html; charset=utf-8")
+            return
         if path == "/api/overview":
             self._send(200, STATE.poll())
             return
@@ -348,6 +354,8 @@ a,button{color:inherit}
 .brand b{font-size:15px;letter-spacing:-.01em}.brand span{color:var(--dim);font:12px/1.2 var(--mono);display:block}
 .status{color:var(--dim);font:12px/1.5 var(--mono);flex:0 0 auto;padding-left:16px;border-left:1px solid var(--line)}
 .status b{color:var(--green);font-weight:500}
+.navlink{flex:0 0 auto;color:var(--blue);font:12px/1 var(--mono);text-decoration:none;padding:7px 11px;border:1px solid var(--line2);border-radius:8px;background:var(--panel)}
+.navlink:hover{border-color:var(--blue)}
 /* main */
 main{flex:1;display:flex;flex-direction:column;min-width:0;overflow:hidden}
 .top{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#0e141c,#0a0d12)}
@@ -412,6 +420,7 @@ td.cmd .bb{color:var(--amber)}td.cmd .dl{color:var(--red)}
   <div class="top">
     <div class="brand"><span class="dot"></span><div><b>JustDNS</b><span>honeypot&nbsp;node</span></div></div>
     <div class="status">srv-web-01 &middot; egress&nbsp;<b>locked</b> &middot; live&nbsp;3s</div>
+    <a class="navlink" href="/setup">+ Sensor anbinden</a>
     <div class="kpi">
       <div class="k red"><div class="n tnum" id="kp-shell">0</div><div class="l">in Shell</div></div>
       <div class="k amber"><div class="n tnum" id="kp-ev">0</div><div class="l">Logins</div></div>
@@ -535,6 +544,107 @@ async function tick(){
 }
 tick();
 setInterval(tick, 3000);
+</script>
+</body></html>"""
+
+
+SETUP_HTML = """<!doctype html>
+<html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JustDNS Node - Sensoren anbinden</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0a0d12;--panel:#10151d;--line:#1e2733;--line2:#2a3542;--ink:#dfe6ef;--mut:#8695a8;--dim:#7e8ca0;
+--blue:#6cc7ff;--green:#5fdd97;--amber:#f5b445;--mono:"IBM Plex Mono",ui-monospace,monospace;--sans:"IBM Plex Sans",system-ui,sans-serif;color-scheme:dark;}
+*{box-sizing:border-box}html,body{margin:0}body{background:var(--bg);color:var(--ink);font:14px/1.5 var(--sans);min-height:100vh}
+a{color:var(--blue)}
+.wrap{max-width:860px;margin:0 auto;padding:22px 16px 64px}
+.top{display:flex;align-items:center;gap:12px;padding:4px 0 18px;border-bottom:1px solid var(--line);margin-bottom:22px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px #102418}
+.top b{font-size:15px}.top span{color:var(--dim);font:12px/1 var(--mono)}
+.back{margin-left:auto;color:var(--blue);font:12px/1 var(--mono);text-decoration:none;padding:7px 11px;border:1px solid var(--line2);border-radius:8px}
+.back:hover{border-color:var(--blue)}
+.lead{color:var(--mut);margin:0 0 22px;max-width:62ch}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:18px}
+.card h2{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin:0 0 4px}
+.card p.d{color:var(--dim);margin:0 0 14px;font-size:13px}
+.row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.f{flex:1;min-width:150px}.f.sm{flex:0 0 120px}
+label{display:block;font-size:12px;color:var(--mut);margin-bottom:4px}
+input,select{width:100%;font:inherit;background:#0d1117;color:var(--ink);border:1px solid var(--line2);border-radius:8px;padding:8px 10px}
+input:focus,select:focus{outline:2px solid var(--blue);outline-offset:1px}
+.chk{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--mut);margin:2px 0 12px}.chk input{width:auto}
+.cmd{display:flex;gap:10px;align-items:flex-start;background:#070a0e;border:1px solid var(--line2);border-radius:9px;padding:11px 12px}
+.cmd code{font-family:var(--mono);font-size:13px;color:#e7edf4;white-space:pre-wrap;word-break:break-all;flex:1}
+.cmd .dl{color:var(--amber)}
+.copy{flex:0 0 auto;font:500 12px/1 var(--mono);color:var(--bg);background:var(--blue);border:0;border-radius:7px;padding:8px 12px;cursor:pointer}
+.copy.ok{background:var(--green)}
+.note{color:var(--dim);font-size:12px;margin:10px 0 0}
+.note b{color:var(--amber);font-weight:500}
+</style></head>
+<body><div class="wrap">
+  <div class="top"><span class="dot"></span><div><b>JustDNS</b> <span>honeypot node</span></div>
+    <a class="back" href="/">&larr; Konsole</a></div>
+  <p class="lead">Sensoren an diese Node anbinden. Beide melden abgelehnte Zugriffe an die
+  zentrale Intake; dort werden IPs manuell geprueft und erst dann fuer die Blockliste
+  freigegeben. Private IPs werden nie veroeffentlicht.</p>
+
+  <div class="card">
+    <h2>Agent ausrollen</h2>
+    <p class="d">Liest App-Ablehnungen (nginx, Caddy, Node64, NPM, Apache, HAProxy, sshd,
+    fail2ban) und meldet die Quell-IPs. Befehl auf dem Ziel-Host als root ausfuehren.</p>
+    <div class="row">
+      <div class="f"><label>Host-Name (LXC / VM)</label><input id="ag_name" placeholder="web-02" oninput="buildAgent()"></div>
+      <div class="f sm"><label>Anwendung</label><select id="ag_app" onchange="buildAgent()">
+        <option>nginx</option><option>apache</option><option>caddy</option><option>node64</option>
+        <option>npm</option><option>haproxy</option><option>sshd</option><option>fail2ban</option></select></div>
+    </div>
+    <div class="cmd"><code id="ag_cmd"></code><button class="copy" onclick="cp('ag_cmd',this)">Kopieren</button></div>
+    <p class="note">Der Agent erscheint danach in der Intake als <b>ausstehend</b> - erst nach
+    deiner Freigabe fliessen seine oeffentlichen IPs weiter.</p>
+  </div>
+
+  <div class="card">
+    <h2>Firewall anbinden (Unifi, nur lesen)</h2>
+    <p class="d">Liest IPS/IDS-Alarme und Firewall-Drops vom Unifi-Controller. Befehl auf
+    einem Host mit Zugriff auf den Controller als root ausfuehren; er fragt den API-Key
+    sicher ab (nicht im Befehl).</p>
+    <div class="row">
+      <div class="f"><label>Controller-URL</label><input id="fw_url" placeholder="https://192.168.1.1" oninput="buildFw()"></div>
+      <div class="f sm"><label>Site</label><input id="fw_site" value="default" oninput="buildFw()"></div>
+    </div>
+    <label class="chk"><input type="checkbox" id="fw_tls" onchange="buildFw()"> Selbstsigniertes Controller-Zertifikat (TLS-Pruefung aus)</label>
+    <div class="cmd"><code id="fw_cmd"></code><button class="copy" onclick="cp('fw_cmd',this)">Kopieren</button></div>
+    <p class="note">Den read-only API-Key bekommst du im Controller unter <b>Settings &rarr;
+    Control Plane &rarr; Integrations</b> (am besten unter einem Viewer-Admin). Der Reader
+    registriert sich selbst und erscheint in der Intake als ausstehend.</p>
+  </div>
+</div>
+<script>
+const INTAKE = "__INTAKE_URL__";
+const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const dl = '<span class="dl">curl</span>';
+function shq(s){ return "'" + String(s).replace(/'/g,"'\\\\''") + "'"; }
+function buildAgent(){
+  const name = (document.getElementById('ag_name').value || 'mein-host').trim();
+  const app = document.getElementById('ag_app').value;
+  const c = `curl -fsSL ${INTAKE}/agent/install | sudo bash -s -- --name ${esc(name)} --app ${esc(app)}`;
+  document.getElementById('ag_cmd').innerHTML = c.replace('curl', dl);
+}
+function buildFw(){
+  const url = (document.getElementById('fw_url').value || 'https://192.168.1.1').trim();
+  const site = (document.getElementById('fw_site').value || 'default').trim();
+  const insec = document.getElementById('fw_tls').checked ? ' --insecure' : '';
+  const c = `curl -fsSL ${INTAKE}/firewall/install | sudo bash -s -- --unifi-url ${esc(url)} --site ${esc(site)}${insec}`;
+  document.getElementById('fw_cmd').innerHTML = c.replace('curl', dl);
+}
+function cp(id,btn){
+  const t = document.getElementById(id).textContent;
+  navigator.clipboard.writeText(t).then(()=>{ btn.textContent='Kopiert'; btn.classList.add('ok');
+    setTimeout(()=>{btn.textContent='Kopieren';btn.classList.remove('ok');},1400); });
+}
+buildAgent(); buildFw();
 </script>
 </body></html>"""
 
