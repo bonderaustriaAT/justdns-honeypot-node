@@ -4,23 +4,29 @@
 # Die Decoys sind reine Server und rufen nie nach aussen. Baut die Node doch
 # eine ausgehende Verbindung zu etwas Nicht-Erlaubtem auf, ist das ein starkes
 # Kompromittierungs-Signal (z.B. ein ausgebrochener Angreifer, der nachladen
-# will). Dieses Skript findet solche Verbindungen ueber ss und schlaegt Alarm.
-# Im Enforce-Modus stoppt es zusaetzlich die Honeypot-Dienste, um die Node
-# einzudaemmen.
+# will). Dieses Skript findet solche Verbindungen ueber ss und MELDET sie an die
+# Intake. Im Dashboard erscheint der Alarm; der Mensch bestaetigt oder ignoriert
+# ihn. Es passiert NICHTS automatisch - ausser im optionalen Enforce-Modus, der
+# zusaetzlich die Honeypot-Dienste stoppt (Default aus).
 #
 # Ergaenzt die Egress-Firewall (scripts/egress-lockdown.sh): die Firewall
 # BLOCKT, der Canary ERKENNT und MELDET (die Firewall allein waere stumm).
 #
-#   ./scripts/compromise-canary.sh            # nur pruefen + alarmieren
+#   ./scripts/compromise-canary.sh            # pruefen + an Dashboard melden
 #   CANARY_ENFORCE=1 ./scripts/compromise-canary.sh   # zusaetzlich Dienste stoppen
+#
+# Intake-Ziel (URL + Token) wird aus der Shipper-Config gelesen, kein Extra-Setup.
 #
 # Env:
 #   CANARY_ALLOW_IPS    "192.168.20.52 192.168.20.5 192.168.20.25" (Intake + DNS)
 #   CANARY_ALLOW_PORTS  "53 123 443 8787" (erlaubte Zielports, u.a. HTTPS/Intake)
-#   CANARY_ENFORCE      "1" -> bei Fund die Decoys stoppen
-#   CANARY_SERVICES     zu stoppende Dienste
-#   CANARY_WEBHOOK      optionale URL, bekommt bei Fund ein POST (curl noetig)
-#   CANARY_ALERT_FILE   Default /var/tmp/justdns-canary-alert.log
+#   CANARY_ENFORCE      "1" -> bei Fund die Decoys stoppen (Default 0 = nur melden)
+#   CANARY_SERVICES     zu stoppende Dienste (nur im Enforce-Modus)
+#   CANARY_INTAKE_CONF  Shipper-Config mit INTAKE_URL + TOKEN (Default /etc/justdns-shipper.conf)
+#   CANARY_INTAKE_URL   ueberschreibt INTAKE_URL aus der Config
+#   CANARY_TOKEN        ueberschreibt TOKEN aus der Config
+#   CANARY_WEBHOOK      optionale Zusatz-URL, bekommt bei Fund ein POST
+#   CANARY_ALERT_FILE   lokales Log, Default /var/tmp/justdns-canary-alert.log
 set -eu
 
 ALLOW_IPS="${CANARY_ALLOW_IPS:-192.168.20.52 192.168.20.5 192.168.20.25}"
@@ -29,6 +35,11 @@ ENFORCE="${CANARY_ENFORCE:-0}"
 SERVICES="${CANARY_SERVICES:-justdns-rawdecoy justdns-webdecoy cowrie opencanary}"
 ALERT_FILE="${CANARY_ALERT_FILE:-/var/tmp/justdns-canary-alert.log}"
 WEBHOOK="${CANARY_WEBHOOK:-}"
+INTAKE_CONF="${CANARY_INTAKE_CONF:-/etc/justdns-shipper.conf}"
+
+conf_val() { sed -n -E "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*(.*)$/\1/p" "$INTAKE_CONF" 2>/dev/null | head -1; }
+INTAKE_URL="${CANARY_INTAKE_URL:-$(conf_val INTAKE_URL)}"
+INTAKE_TOKEN="${CANARY_TOKEN:-$(conf_val TOKEN)}"
 
 in_list() { local n="$1"; shift; for x in "$@"; do [ "$x" = "$n" ] && return 0; done; return 1; }
 
@@ -65,9 +76,26 @@ fi
 
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 host="$(hostname)"
+detail="$(printf '%b' "$anomalies" | sed '/^$/d' | tr '\n' ';' | sed 's/;$//')"
 msg="[${ts}] CANARY ${host}: unerwartete ausgehende Verbindung(en):
 $(printf '%b' "$anomalies")"
 printf '%s\n' "$msg" | tee -a "$ALERT_FILE" >&2
+
+# An die Intake melden -> Alarm im Dashboard (Mensch bestaetigt/ignoriert).
+if [ -n "$INTAKE_URL" ] && [ -n "$INTAKE_TOKEN" ] && command -v python3 >/dev/null 2>&1; then
+  python3 - "$INTAKE_URL" "$INTAKE_TOKEN" "$detail" <<'PY' || true
+import sys, json, urllib.request
+url = sys.argv[1].rstrip('/') + "/canary-alert"
+req = urllib.request.Request(url, data=json.dumps({"detail": sys.argv[3]}).encode(),
+                             method="POST")
+req.add_header("Authorization", "Bearer " + sys.argv[2])
+req.add_header("Content-Type", "application/json")
+try:
+    urllib.request.urlopen(req, timeout=8).read()
+except Exception as e:
+    print("[canary] Intake-Meldung fehlgeschlagen:", e, file=sys.stderr)
+PY
+fi
 
 if [ -n "$WEBHOOK" ] && command -v curl >/dev/null 2>&1; then
   curl -s -m 10 -X POST --form-string "text=${msg}" "$WEBHOOK" >/dev/null 2>&1 || true
