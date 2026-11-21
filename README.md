@@ -9,7 +9,9 @@ attempt to JustDNS. From there the source IPs flow into the public blocklist
 which anyone can use to filter known attackers.
 
 Your node never gets write access to the list. It only submits what it sees.
-The list itself is built centrally, after filtering, by JustDNS.
+It registers itself on first run, so there is nothing to sign up for. The list
+itself is built centrally, after filtering and after JustDNS has approved your
+node, so a new node cannot push anything to the public list on its own.
 
 ## How it works
 
@@ -62,15 +64,17 @@ attempts above. The token identifies your node and nothing else.
 
 A few more things worth knowing:
 
-- From an external node, an IP is only considered for the list after it has
-  made at least **two** attempts on your node. A single stray hit is ignored.
-- Before anything is published, central filters drop known scanners and
-  research crawlers (by reverse DNS), large shared infrastructure such as
-  Cloudflare and Google ranges, carrier-grade NAT, and anything on the
-  allowlist.
+- Your node's IPs are not published until JustDNS has reviewed and approved
+  your node. Until then, everything your node reports is stored and visible to
+  us, but nothing is pushed to the public list. This is what keeps a bad actor
+  from listing arbitrary IPs.
+- Even after approval, central filters run before anything is published: known
+  scanners and research crawlers (by reverse DNS), large shared infrastructure
+  such as Cloudflare and Google ranges, carrier-grade NAT, and anything on the
+  allowlist are dropped.
 - The public list is cumulative. Once an IP is listed it stays listed.
-- Your submission token is write-only. It can post events and do nothing else,
-  and we can revoke it for your node alone at any time.
+- Your node's token is write-only. It can post events and do nothing else, and
+  we can revoke it for your node alone at any time.
 
 ## Requirements
 
@@ -78,14 +82,20 @@ A few more things worth knowing:
   VPS or an isolated VM. Treat it as disposable.
 - Docker and the Docker Compose plugin, or a plain host if you prefer the
   systemd route further down.
-- A `SENSOR_ID` and `TOKEN` from JustDNS (see below).
+- Nothing to sign up for. Your node registers itself on first run.
 
-## Get a token
+## Registering your node
 
-Open an issue in this repo with a short note that you want to run a node, or
-reach out through the contact listed on the JustDNS site. You will get a
-`SENSOR_ID` and a `TOKEN` back. We hand the token over directly, not in a
-public thread.
+There is no manual token step. On its first run the shipper calls the intake,
+registers itself, and stores its own write-only token locally (in the state
+file). From then on it sends attacker data right away.
+
+What it does not do is publish anything yet. A freshly registered node sits in
+a pending state until we approve it. Once we have seen that it reports real
+attacker traffic, we approve it and its IPs start flowing into the public list
+on the next run. If you want your node approved, open an issue in this repo or
+reach out through the contact on the JustDNS site so we know it is yours and
+can look for it.
 
 ## Quick start (Docker)
 
@@ -93,7 +103,7 @@ public thread.
 git clone https://github.com/bonderaustriaAT/justdns-honeypot-node.git
 cd justdns-honeypot-node
 cp .env.example .env
-# edit .env, set SENSOR_ID and TOKEN
+# optional: open .env and set a node name (SENSOR_ID). No token needed.
 docker compose up -d
 ```
 
@@ -132,8 +142,9 @@ docker compose exec cowrie tail -f var/log/cowrie/cowrie.json
 docker compose logs --tail=20 shipper
 ```
 
-Once real attempts show up, the source IPs appear in the public list within a
-few minutes after the central processor runs.
+Real attempts are stored by the intake right away. Once your node has been
+approved, the source IPs appear in the public list a few minutes after the
+central processor runs.
 
 ## More services (optional)
 
@@ -150,7 +161,7 @@ shipper on its own:
 ```bash
 sudo install -D shipper/shipper.py /opt/justdns-shipper/shipper.py
 sudo cp shipper/shipper.conf.example /etc/justdns-shipper.conf
-# edit /etc/justdns-shipper.conf: SENSOR_ID, TOKEN, INTAKE_URL, log paths
+# edit /etc/justdns-shipper.conf: INTAKE_URL and your log paths (no token needed)
 sudo install -d -o cowrie -g cowrie /var/lib/justdns-shipper
 sudo cp shipper/systemd/justdns-shipper.* /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -171,7 +182,8 @@ docker compose up -d
 
 - Run this on a host you can throw away. It is a decoy, not a service you
   depend on.
-- Keep your token secret. If it leaks, tell us and we revoke it.
+- The node's token lives in the shipper state file. Keep it private. If it
+  leaks, tell us and we revoke it.
 - Do not run anything real on the forwarded port.
 - The honeypot never lets anyone in, so there is no shell to break out of, but
   isolating the box is still good hygiene.

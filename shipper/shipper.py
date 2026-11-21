@@ -7,13 +7,16 @@ Logdatei werden erst nach erfolgreichem POST fortgeschrieben; schlaegt der POST
 fehl (Intake offline), bleiben die Offsets stehen und beim naechsten Lauf wird
 alles erneut gesendet. Dedup macht die Zentrale ueber (sensor_id, event_uid).
 
-Fremd-Deploy: nur SENSOR_ID, TOKEN, INTAKE_URL setzen (Env oder Config-Datei).
+Fremd-Deploy: im Normalfall reicht INTAKE_URL. Ohne TOKEN registriert sich der
+Shipper beim ersten Lauf selbst (POST /register) und legt sein Token im
+STATE_FILE ab. Alternativ TOKEN direkt setzen (eigene/vorab angelegte Nodes).
 Nur Standardbibliothek. Als systemd-Timer/Service ausrollbar.
 
 Config (Env ODER Datei via --config, KEY=VALUE je Zeile):
-  SENSOR_ID    informativ (Zentrale leitet den Sensor aus dem Token ab)
-  TOKEN        Submission-Token (jdhs_...)
-  INTAKE_URL   z.B. https://intake.justdns.justfuture.at
+  INTAKE_URL   Pflicht, z.B. https://intake.justdns.justfuture.at
+  TOKEN        optional. Leer -> Shipper registriert sich selbst beim ersten Lauf.
+  SENSOR_ID    optional, nur als Namensvorschlag bei der Selbst-Registrierung.
+  OPERATOR     optional, Label fuers zentrale Dashboard (z.B. Kontakt/Team).
   COWRIE_LOG   Glob, Default /home/cowrie/cowrie/var/log/cowrie/cowrie.json*
   OC_LOG       Glob, Default /var/tmp/opencanary.log*
   STATE_FILE   Default /var/lib/justdns-shipper/state.json
@@ -25,6 +28,7 @@ import glob
 import hashlib
 import json
 import os
+import socket
 import sys
 import urllib.error
 import urllib.request
@@ -35,8 +39,9 @@ PORT_SVC = {21: "FTP", 23: "TELNET", 80: "HTTP", 3306: "MYSQL",
 
 DEFAULTS = {
     "SENSOR_ID": "",
+    "OPERATOR": "",
     "TOKEN": "",
-    "INTAKE_URL": "",
+    "INTAKE_URL": "https://intake.justdns.justfuture.at",
     "COWRIE_LOG": "/home/cowrie/cowrie/var/log/cowrie/cowrie.json*",
     "OC_LOG": "/var/tmp/opencanary.log*",
     "STATE_FILE": "/var/lib/justdns-shipper/state.json",
@@ -178,6 +183,40 @@ def read_new_events(fpath, start_offset, parser):
     return events, offset
 
 
+def register(url, name, operator):
+    """Self-Service-Registrierung an der Intake. Gibt (sensor_id, token) zurueck."""
+    body = json.dumps({"name": name, "operator": operator}).encode("utf-8")
+    req = urllib.request.Request(
+        url.rstrip("/") + "/register", data=body, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return data["sensor_id"], data["token"]
+
+
+def ensure_token(cfg, state):
+    """Token beschaffen: aus Config, sonst aus dem State (fruehere Registrierung),
+    sonst jetzt selbst registrieren. Gibt den Token zurueck oder None bei Fehler.
+    Schreibt eine neue Registrierung sofort in den State (ueberlebt Neustarts)."""
+    token = cfg["TOKEN"].strip()
+    if token:
+        return token
+    saved = state.get("_sensor") if isinstance(state.get("_sensor"), dict) else None
+    if saved and saved.get("token"):
+        return saved["token"]
+    name = cfg.get("SENSOR_ID") or socket.gethostname() or "node"
+    try:
+        sid, token = register(cfg["INTAKE_URL"], name, cfg.get("OPERATOR", ""))
+    except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
+        log(f"Selbst-Registrierung fehlgeschlagen: {exc} - Retry naechster Lauf")
+        return None
+    state["_sensor"] = {"sensor_id": sid, "token": token}
+    save_state(cfg["STATE_FILE"], state)
+    log(f"registriert als Sensor {sid} (wartet auf Freigabe in der Zentrale)")
+    return token
+
+
 def post_batch(url, token, events):
     body = json.dumps({"events": events}).encode("utf-8")
     req = urllib.request.Request(
@@ -220,19 +259,25 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    if not cfg["TOKEN"] or not cfg["INTAKE_URL"]:
-        log("TOKEN und INTAKE_URL erforderlich (Env oder --config).")
+    if not cfg["INTAKE_URL"]:
+        log("INTAKE_URL erforderlich (Env oder --config).")
         return 2
 
     batch = max(1, int(cfg["BATCH"]))
     state = load_state(cfg["STATE_FILE"])
+
+    token = ensure_token(cfg, state)
+    if not token:
+        save_state(cfg["STATE_FILE"], state)
+        return 1
+
     total = 0
     all_ok = True
 
     jobs = [(cfg["COWRIE_LOG"], parse_cowrie), (cfg["OC_LOG"], parse_opencanary)]
     for pattern, parser in jobs:
         for fpath in sorted(glob.glob(pattern)):
-            sent, ok = ship_file(fpath, state, parser, cfg["INTAKE_URL"], cfg["TOKEN"], batch)
+            sent, ok = ship_file(fpath, state, parser, cfg["INTAKE_URL"], token, batch)
             total += sent
             all_ok = all_ok and ok
             if not ok:

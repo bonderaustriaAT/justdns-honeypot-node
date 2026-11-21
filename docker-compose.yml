@@ -1,6 +1,6 @@
 # JustDNS honeypot node: Cowrie SSH honeypot plus the shipper that forwards
-# attacker login attempts to the JustDNS intake. Copy .env.example to .env and
-# fill in SENSOR_ID and TOKEN first.
+# attacker login attempts to the JustDNS intake. Copy .env.example to .env
+# (no token needed, the shipper self-registers on first run), then:
 #
 #   docker compose up -d
 #
@@ -25,8 +25,9 @@ services:
     depends_on:
       - cowrie
     environment:
-      SENSOR_ID: ${SENSOR_ID}
-      TOKEN: ${TOKEN}
+      SENSOR_ID: ${SENSOR_ID:-}
+      OPERATOR: ${OPERATOR:-}
+      TOKEN: ${TOKEN:-}
       INTAKE_URL: ${INTAKE_URL:-https://intake.justdns.justfuture.at}
       COWRIE_LOG: /logs/cowrie/cowrie.json*
       OC_LOG: /logs/opencanary/opencanary.log*

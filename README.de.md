@@ -9,8 +9,11 @@ Quell-IPs in die oeffentliche Blockliste
 [`justdns-threat-ips`](https://github.com/bonderaustriaAT/justdns-threat-ips),
 die jeder zum Filtern bekannter Angreifer nutzen kann.
 
-Dein Node bekommt nie Schreibrechte an der Liste. Er meldet nur, was er sieht.
-Die Liste selbst wird zentral und erst nach Filterung von JustDNS gepflegt.
+Dein Node bekommt nie Schreibrechte an der Liste. Er meldet nur, was er sieht,
+und registriert sich beim ersten Start selbst, du musst dich also nirgends
+anmelden. Die Liste selbst wird zentral gepflegt, erst nach Filterung und erst
+nachdem JustDNS deinen Node freigegeben hat. Ein neuer Node kann also von sich
+aus nichts in die oeffentliche Liste schieben.
 
 ## So funktioniert es
 
@@ -64,16 +67,17 @@ und sonst nichts.
 
 Noch ein paar Dinge, die du wissen solltest:
 
-- Von einem externen Node wird eine IP erst dann fuer die Liste in Betracht
-  gezogen, wenn sie mindestens **zwei** Versuche auf deinem Node gemacht hat.
-  Ein einzelner Streifschuss wird ignoriert.
-- Bevor etwas veroeffentlicht wird, werfen zentrale Filter bekannte Scanner und
-  Research-Crawler raus (per Reverse-DNS), grosse geteilte Infrastruktur wie
-  Cloudflare- und Google-Bereiche, Carrier-Grade-NAT und alles auf der
-  Allowlist.
+- Die IPs deines Nodes werden erst veroeffentlicht, wenn JustDNS deinen Node
+  geprueft und freigegeben hat. Bis dahin wird alles, was dein Node meldet,
+  gespeichert und ist fuer uns sichtbar, aber nichts landet in der oeffentlichen
+  Liste. Genau das verhindert, dass jemand beliebige IPs reindrueckt.
+- Auch nach der Freigabe laufen zentrale Filter, bevor etwas veroeffentlicht
+  wird: bekannte Scanner und Research-Crawler (per Reverse-DNS), grosse geteilte
+  Infrastruktur wie Cloudflare- und Google-Bereiche, Carrier-Grade-NAT und alles
+  auf der Allowlist werden entfernt.
 - Die oeffentliche Liste ist kumulativ. Einmal gelistet, bleibt eine IP
   gelistet.
-- Dein Submission-Token ist write-only. Es kann Events melden und sonst nichts,
+- Das Token deines Nodes ist write-only. Es kann Events melden und sonst nichts,
   und wir koennen es allein fuer deinen Node jederzeit widerrufen.
 
 ## Voraussetzungen
@@ -82,14 +86,21 @@ Noch ein paar Dinge, die du wissen solltest:
   kleiner VPS oder eine isolierte VM. Behandle ihn als wegwerfbar.
 - Docker samt Docker-Compose-Plugin, oder ein nackter Host, wenn du lieber den
   systemd-Weg weiter unten gehst.
-- Eine `SENSOR_ID` und ein `TOKEN` von JustDNS (siehe unten).
+- Keine Anmeldung noetig. Dein Node registriert sich beim ersten Start selbst.
 
-## Token bekommen
+## Node registrieren
 
-Mach ein Issue in diesem Repo auf mit einer kurzen Notiz, dass du einen Node
-betreiben willst, oder melde dich ueber den Kontakt auf der JustDNS-Seite. Du
-bekommst eine `SENSOR_ID` und ein `TOKEN` zurueck. Das Token uebergeben wir
-direkt, nicht in einem oeffentlichen Thread.
+Es gibt keinen manuellen Token-Schritt. Beim ersten Lauf meldet sich der Shipper
+bei der Intake an, registriert sich und legt sein eigenes write-only Token lokal
+ab (in der State-Datei). Ab da sendet er sofort Angreifer-Daten.
+
+Was er noch nicht tut: irgendetwas veroeffentlichen. Ein frisch registrierter
+Node bleibt so lange im Wartezustand, bis wir ihn freigeben. Sobald wir sehen,
+dass er echten Angreifer-Verkehr meldet, geben wir ihn frei und seine IPs
+fliessen beim naechsten Lauf in die oeffentliche Liste. Wenn du moechtest, dass
+dein Node freigegeben wird, mach ein Issue in diesem Repo auf oder melde dich
+ueber den Kontakt auf der JustDNS-Seite, damit wir wissen, dass er von dir ist,
+und nach ihm schauen.
 
 ## Schnellstart (Docker)
 
@@ -97,7 +108,7 @@ direkt, nicht in einem oeffentlichen Thread.
 git clone https://github.com/bonderaustriaAT/justdns-honeypot-node.git
 cd justdns-honeypot-node
 cp .env.example .env
-# .env bearbeiten, SENSOR_ID und TOKEN eintragen
+# optional: in .env einen Node-Namen (SENSOR_ID) setzen. Kein Token noetig.
 docker compose up -d
 ```
 
@@ -137,8 +148,9 @@ docker compose exec cowrie tail -f var/log/cowrie/cowrie.json
 docker compose logs --tail=20 shipper
 ```
 
-Sobald echte Versuche auftauchen, erscheinen die Quell-IPs wenige Minuten nach
-dem naechsten Lauf des zentralen Processors in der oeffentlichen Liste.
+Echte Versuche speichert die Intake sofort. Sobald dein Node freigegeben ist,
+erscheinen die Quell-IPs wenige Minuten nach dem naechsten Lauf des zentralen
+Processors in der oeffentlichen Liste.
 
 ## Mehr Dienste (optional)
 
@@ -155,7 +167,7 @@ nur den Shipper laufen lassen:
 ```bash
 sudo install -D shipper/shipper.py /opt/justdns-shipper/shipper.py
 sudo cp shipper/shipper.conf.example /etc/justdns-shipper.conf
-# /etc/justdns-shipper.conf bearbeiten: SENSOR_ID, TOKEN, INTAKE_URL, Logpfade
+# /etc/justdns-shipper.conf bearbeiten: INTAKE_URL und deine Logpfade (kein Token noetig)
 sudo install -d -o cowrie -g cowrie /var/lib/justdns-shipper
 sudo cp shipper/systemd/justdns-shipper.* /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -176,8 +188,8 @@ docker compose up -d
 
 - Betreibe das auf einem Host, den du wegwerfen kannst. Es ist ein Koeder, kein
   Dienst, auf den du dich verlaesst.
-- Halte dein Token geheim. Wenn es durchsickert, sag Bescheid, dann widerrufen
-  wir es.
+- Das Token deines Nodes liegt in der State-Datei des Shippers. Halte sie
+  privat. Wenn es durchsickert, sag Bescheid, dann widerrufen wir es.
 - Lass nichts Echtes auf dem weitergeleiteten Port laufen.
 - Der Honeypot laesst niemanden rein, es gibt also keine Shell zum Ausbrechen,
   trotzdem ist eine isolierte Box gute Praxis.

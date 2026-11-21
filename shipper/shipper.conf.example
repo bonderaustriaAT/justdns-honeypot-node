@@ -2,20 +2,27 @@
 # Copy to /etc/justdns-shipper.conf and fill in. Environment variables of the
 # same name override these values.
 
-# Your node name, as agreed with JustDNS.
-SENSOR_ID = changeme
-
-# The submission token you received. Keep it secret (chmod 600 this file).
-TOKEN = jdhs_changeme
-
 # Where events go. Leave as is unless told otherwise.
 INTAKE_URL = https://intake.justdns.justfuture.at
+
+# Leave TOKEN blank for the normal flow: on its first run the shipper registers
+# itself and stores its own token in STATE_FILE. Only set a token if JustDNS
+# handed you one directly for a pre-arranged node.
+TOKEN =
+
+# Optional friendly name for your node (shown to us). Blank = use the hostname.
+SENSOR_ID =
+
+# Optional label so we can reach you (team, email, handle). Shown to us only.
+OPERATOR =
 
 # Log sources. Adjust the paths to where your honeypots write.
 COWRIE_LOG = /home/cowrie/cowrie/var/log/cowrie/cowrie.json*
 OC_LOG     = /var/tmp/opencanary.log*
 
-# Where the shipper remembers how far it got.
+# Where the shipper remembers how far it got AND its self-registered token.
+# Keep this file private (chmod 600) and do not delete it, or the node
+# re-registers as a new sensor.
 STATE_FILE = /var/lib/justdns-shipper/state.json
 
 # Events per request.
