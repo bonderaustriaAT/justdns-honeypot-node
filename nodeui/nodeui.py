@@ -166,6 +166,23 @@ def parse_cowrie_nachlade(line):
     return None
 
 
+def parse_cowrie_shell(line):
+    """Alles was ein eingeloggter Angreifer tippt: jede cowrie.command.input-Zeile.
+    {ts, src_ip, proto, command}. Zeigt die komplette Shell-Aktivitaet nach Login."""
+    try:
+        e = json.loads(line)
+    except ValueError:
+        return None
+    if e.get("eventid") != "cowrie.command.input":
+        return None
+    ip = e.get("src_ip")
+    inp = e.get("input")
+    if not ip or not inp:
+        return None
+    proto = "TELNET" if e.get("protocol") == "telnet" else "SSH"
+    return {"ts": e.get("timestamp"), "src_ip": ip, "proto": proto, "command": inp[:600]}
+
+
 class State:
     """Geteilter Zustand, unter einem Lock aktualisiert."""
 
@@ -174,6 +191,7 @@ class State:
         self.offsets = {}                         # tag:path -> byte-offset
         self.feed = collections.deque(maxlen=FEED_MAX)
         self.nachlade = collections.deque(maxlen=200)   # Download-/wget-Versuche
+        self.shell = collections.deque(maxlen=400)      # alle Shell-Eingaben nach Login
         self.ip_counts = {}                       # ip -> [count, last_ts]
         self.events_total = 0
         self.since = None
@@ -215,6 +233,9 @@ class State:
     def _add_nachlade(self, ev):
         self.nachlade.append(ev)
 
+    def _add_shell(self, ev):
+        self.shell.append(ev)
+
     def _add(self, ev):
         self.events_total += 1
         ev["seq"] = self.events_total     # monotone Sequenz, fuer "nur neue ab Oeffnen"
@@ -239,6 +260,8 @@ class State:
                     self._read_file(fpath, parser, self._add, "atk")
             for fpath in sorted(glob.glob(COWRIE_LOG)):
                 self._read_file(fpath, parse_cowrie_nachlade, self._add_nachlade, "nl")
+            for fpath in sorted(glob.glob(COWRIE_LOG)):
+                self._read_file(fpath, parse_cowrie_shell, self._add_shell, "sh")
             top = sorted(self.ip_counts.items(), key=lambda kv: kv[1][0], reverse=True)[:20]
             return {
                 "since": self.since,
@@ -247,6 +270,7 @@ class State:
                 "ips_capped": len(self.ip_counts) >= MAX_IPS,
                 "feed": list(self.feed)[-200:][::-1],   # neueste zuerst
                 "nachlade": list(self.nachlade)[-100:][::-1],
+                "shell": list(self.shell)[-150:][::-1],
                 "top": [{"ip": ip, "count": v[0], "last_ts": v[1]} for ip, v in top],
             }
 
@@ -348,6 +372,11 @@ INDEX_HTML = """<!doctype html>
     <table><thead><tr><th>Zeit (Wien)</th><th>Source IP</th><th>Domains</th><th>Command</th></tr></thead>
       <tbody id="nl"></tbody></table>
   </section>
+  <section style="grid-column:1/-1">
+    <h2>Shell-Aktivit&auml;t <span class="muted">alle Eingaben nach erfolgreichem Login</span></h2>
+    <table><thead><tr><th>Zeit (Wien)</th><th>Source IP</th><th>Proto</th><th>Command</th></tr></thead>
+      <tbody id="shell"></tbody></table>
+  </section>
 </main>
 <script>
 const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -403,6 +432,17 @@ async function tick(){
        + `<td>${doms}</td><td class="mono cmd">${esc(r.command)}</td></tr>`;
   }
   document.getElementById('nl').innerHTML = nh || '<tr><td colspan="4" class="muted">Noch keine Nachlade-Versuche&hellip;</td></tr>';
+
+  let sh = d.shell || [];
+  if(filter) sh = sh.filter(r => r.src_ip === filter);
+  let sx = '';
+  for(const r of sh){
+    sx += `<tr><td class="muted mono">${esc(shortTs(r.ts))}</td>`
+       + `<td class="mono ip" onclick="setFilter('${esc(r.src_ip)}')">${esc(r.src_ip)}</td>`
+       + `<td><span class="svc">${esc(r.proto||'?')}</span></td>`
+       + `<td class="mono cmd">${esc(r.command)}</td></tr>`;
+  }
+  document.getElementById('shell').innerHTML = sx || '<tr><td colspan="4" class="muted">Noch keine Shell-Eingaben&hellip;</td></tr>';
 
   const top = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,20);
   let t = '';
