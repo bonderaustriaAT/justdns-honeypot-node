@@ -3,8 +3,9 @@
 *English: [README.md](README.md)*
 
 Betreibe einen kleinen Honeypot und hilf dabei, genau die Leute zu blocken, die
-ihn angreifen. Dieses Repo liefert dir einen fertigen SSH-Honeypot (Cowrie) und
-einen Shipper, der jeden Login-Versuch an JustDNS meldet. Von dort fliessen die
+ihn angreifen. Dieses Repo liefert dir einen fertigen Multi-Service-Honeypot
+(Cowrie fuer SSH, dazu OpenCanary fuer FTP, Telnet, HTTP, MySQL, RDP und VNC)
+und einen Shipper, der jeden Versuch an JustDNS meldet. Von dort fliessen die
 Quell-IPs in die oeffentliche Blockliste
 [`justdns-threat-ips`](https://github.com/bonderaustriaAT/justdns-threat-ips),
 die jeder zum Filtern bekannter Angreifer nutzen kann.
@@ -21,8 +22,8 @@ aus nichts in die oeffentliche Liste schieben.
   Angreifer
      |
      v
-  Cowrie (SSH-Honeypot)         jeder Login-Versuch -> cowrie.json
-  OpenCanary (optional)         FTP/Telnet/HTTP/... -> opencanary.log
+  Cowrie      SSH-Login-Versuche            -> cowrie.json
+  OpenCanary  FTP/Telnet/HTTP/MySQL/RDP/VNC -> opencanary.log
      |
      v
   Shipper  --HTTPS POST /events (dein Token)-->  JustDNS Intake
@@ -112,8 +113,9 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Das startet den Cowrie-Honeypot auf Port 2222 und daneben den Shipper. Pruefen,
-ob beide laufen:
+Der erste Lauf baut einmalig das OpenCanary-Image und startet dann Cowrie (SSH
+auf 2222), OpenCanary (die anderen Dienste), den Shipper und die lokale
+Live-Ansicht. Pruefen, ob alles laeuft:
 
 ```bash
 docker compose ps
@@ -124,19 +126,38 @@ Der Shipper schreibt bei jedem Lauf, wie viele Events er gesendet hat. Auf
 einem frischen Node steht das auf null, bis der erste Angreifer auftaucht, was
 auf einer oeffentlichen IP meist nicht lange dauert.
 
-## Angreifer auf den Node leiten
+## Angriffe auf den Node leiten: Port-Forwarding
 
-Angreifer klopfen an Port 22. Der Honeypot lauscht auf 2222, also leitest du
-den Traffic dorthin. Zwei gaengige Wege:
+Dein Node faengt nur, was ihn auch erreicht. Leite darum die Dienst-Ports vom
+WAN (Heim-Router oder Cloud-Firewall) auf diesen Host weiter. Nur SSH wechselt
+den Port, weil Cowrie auf 2222 lauscht; alles andere geht 1:1 durch.
 
-- Am Router oder in der Cloud-Firewall WAN `tcp/22` auf Port `2222` dieses
-  Hosts weiterleiten.
-- Oder, auf einem Host, wo Port 22 frei ist, in der `.env`
-  `COWRIE_SSH_PORT=22` setzen und `docker compose up -d` erneut laufen lassen.
-  Dann lauscht der Honeypot direkt auf 22.
+| Dienst  | Angreifer treffen (WAN) | Auf diesen Host weiterleiten | Faengt |
+|---------|-------------------------|------------------------------|--------|
+| SSH     | tcp/22                  | tcp/2222                     | Cowrie |
+| FTP     | tcp/21                  | tcp/21                       | OpenCanary |
+| Telnet  | tcp/23                  | tcp/23                       | OpenCanary |
+| HTTP    | tcp/80                  | tcp/80                       | OpenCanary |
+| MySQL   | tcp/3306                | tcp/3306                     | OpenCanary |
+| RDP     | tcp/3389                | tcp/3389                     | OpenCanary |
+| VNC     | tcp/5900                | tcp/5900                     | OpenCanary |
 
-Dein eigenes echtes SSH laeuft auf einem anderen Port und zeigt nicht auf den
-Honeypot.
+- **Heim-Router:** fuer jeden WAN-Port oben eine Portweiterleitung auf die
+  LAN-IP dieses Hosts anlegen, Ziel ist der "weiterleiten"-Port. SSH 22 geht auf
+  2222, der Rest auf dieselbe Nummer.
+- **Cloud-VPS:** diese Ports in der Firewall bzw. Security-Group oeffnen. Sie
+  liegen schon auf dem passenden Port, ausser SSH, das du auf 2222 schickst
+  (oder `COWRIE_SSH_PORT=22` setzen, siehe unten).
+
+Du musst nicht alle weiterleiten. SSH allein zieht schon staendig Traffic; die
+anderen holst du dir fuer mehr dazu.
+
+SSH direkt auf Port 22: ist Port 22 am Host frei (dein Admin-SSH laeuft woanders),
+setze `COWRIE_SSH_PORT=22` in `.env`, starte `docker compose up -d` neu und
+leite WAN tcp/22 direkt auf 22.
+
+Halte deine eigenen echten Dienste und dein echtes SSH auf anderen Ports und
+leite nie eine Weiterleitung auf etwas Echtes.
 
 ## Pruefen, ob es laeuft
 
@@ -179,12 +200,21 @@ Auf einem nackten Host (systemd) laeuft es wie der Shipper: `nodeui/nodeui.py`
 nach `/opt/justdns-nodeui/` installieren und
 `nodeui/systemd/justdns-nodeui.service` aktivieren.
 
-## Mehr Dienste (optional)
+## Dienste auf diesem Node
 
-Cowrie deckt SSH ab, wo der meiste Laerm herkommt. Wenn du zusaetzlich FTP,
-Telnet, HTTP, MySQL, RDP und VNC willst, stell OpenCanary daneben. Siehe
-[opencanary/README.md](opencanary/README.md). Der Shipper liest dessen Log
-automatisch mit.
+Ab Werk laufen beide Honeypots, `docker compose up -d` deckt also schon ab:
+
+- **SSH** auf 2222, via Cowrie.
+- **FTP, Telnet, HTTP, MySQL, RDP, VNC**, via OpenCanary, auf ihren
+  Standard-Ports.
+
+Jeder Versuch auf einem davon wird gleich protokolliert und gesendet und taucht
+in der lokalen Live-Ansicht auf. Die OpenCanary-Config liegt in
+[`opencanary/opencanary.conf`](opencanary/opencanary.conf); setz
+`device.node_id` auf deinen eigenen Namen, wenn du magst. Einen Dienst
+abschalten: dort sein `*.enabled` auf `false` setzen und seinen Port aus der
+`docker-compose.yml` nehmen. Hinweise zum Betrieb von OpenCanary ohne Docker
+stehen in [opencanary/README.md](opencanary/README.md).
 
 ## Ohne Docker (systemd)
 

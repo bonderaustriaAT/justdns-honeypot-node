@@ -1,30 +1,42 @@
-# OpenCanary (optional, advanced)
+# OpenCanary (multi-service decoy)
 
-The base node runs Cowrie, which covers SSH. If you want to catch attacks on
-more services (FTP, Telnet, HTTP, MySQL, RDP, VNC), you can also run
-[OpenCanary](https://github.com/thinkst/opencanary) next to it. The shipper
-already picks up its log, so no extra wiring is needed.
+This is the second honeypot on the node, next to Cowrie. It catches attacks on
+FTP, Telnet, HTTP, MySQL, RDP and VNC. `opencanary.conf` in this folder is the
+config our own node uses; it writes JSON to `/var/tmp/opencanary.log`, which is
+where the shipper looks.
 
-`opencanary.conf` in this folder is the config our own node uses. It writes
-JSON to `/var/tmp/opencanary.log`, which is exactly where the shipper looks
-by default (`OC_LOG`).
+## With Docker (default)
 
-## Run it
+Nothing extra to do. `docker-compose.yml` builds OpenCanary from the
+[`Dockerfile`](Dockerfile) here (OpenCanary ships no official image) and runs
+it alongside Cowrie, so `docker compose up -d` already starts it. The service
+ports and how to forward them from the WAN are in the main README. To rebuild
+after changing the version or config:
 
-OpenCanary does not ship a maintained Docker image, so the simplest route is a
-small virtualenv on the host:
+```bash
+docker compose up -d --build opencanary
+```
+
+## Without Docker (bare metal)
+
+If you run the node without Docker, install OpenCanary in a virtualenv on the
+host:
 
 ```bash
 sudo apt-get install -y python3-venv python3-dev libpcap-dev
 python3 -m venv /opt/opencanary-env
-/opt/opencanary-env/bin/pip install opencanary scapy
-sudo cp opencanary.conf /etc/opencanaryd/opencanary.conf
+/opt/opencanary-env/bin/pip install "opencanary==0.9.10" scapy
+sudo install -D opencanary.conf /etc/opencanaryd/opencanary.conf
 /opt/opencanary-env/bin/opencanaryd --start
 ```
 
-Make sure `/var/tmp/opencanary.log` is readable by whatever runs the shipper.
-If you run the shipper in Docker, mount the log into the `opencanary-logs`
-volume (or bind-mount `/var/tmp` into the shipper at `/logs/opencanary`).
+It writes to `/var/tmp/opencanary.log`. Make sure that file is readable by
+whatever runs the shipper (the shipper's `OC_LOG` points there by default).
 
-Change `device.node_id` to your own name. Do not expose the OpenCanary
-management or any real service on the box. This is a decoy only.
+## Config
+
+Each service is a `*.enabled` flag in `opencanary.conf`. Turn one off by
+setting it to `false` (and dropping its port from `docker-compose.yml`). Change
+`device.node_id` to your own name. The portscan module stays off, so no raw
+packet capture is needed. This is a decoy only: do not expose a real service or
+the OpenCanary management on the box.
