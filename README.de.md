@@ -226,19 +226,14 @@ keinem Port ein echter Dienst steckt:
   Dienste auf anderen Ports halten. Ein Koeder ist nur sicher, solange nichts
   Echtes daneben liegt.
 
-### Egress-Lockdown und Compromise-Canary
+### Egress-Lockdown
 
 Zusaetzliche Absicherung fuer den Fall, dass eine Node doch kompromittiert wird:
-
-- [`scripts/egress-lockdown.sh`](scripts/egress-lockdown.sh) setzt eine
-  nft-Firewall, die der Node ausgehend nur das Noetige erlaubt (Intake, DNS, NTP
-  und - fuer das Self-Update - HTTPS). Alles andere NEUE ausgehende wird geloggt
-  und verworfen. Eingehende Angriffe bleiben unberuehrt, nur OUTPUT wird
-  gefiltert. Beim Boot per `justdns-egress.service`.
-- [`scripts/compromise-canary.sh`](scripts/compromise-canary.sh) laeuft als Timer
-  (`justdns-canary.timer`) und meldet unerwartete ausgehende Verbindungen (die
-  Decoys sind reine Server und rufen nie raus). Mit `CANARY_ENFORCE=1` stoppt er
-  bei einem Fund die Decoys, um die Node einzudaemmen.
+[`scripts/egress-lockdown.sh`](scripts/egress-lockdown.sh) setzt eine nft-Firewall,
+die der Node ausgehend nur das Noetige erlaubt (Intake, DNS, NTP und - fuer das
+Self-Update - HTTPS). Alles andere NEUE ausgehende wird geloggt und verworfen.
+Eingehende Angriffe bleiben unberuehrt, nur OUTPUT wird gefiltert. Beim Boot per
+`justdns-egress.service`.
 
 ## Ohne Docker (systemd)
 

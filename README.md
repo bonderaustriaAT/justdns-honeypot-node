@@ -222,19 +222,14 @@ there is no real service behind any port:
 - Still, run this on a disposable host and keep your own real services on other
   ports. A decoy is only safe as long as nothing real sits next to it.
 
-### Egress lockdown and compromise canary
+### Egress lockdown
 
 Extra defense in case a node is compromised anyway:
-
-- [`scripts/egress-lockdown.sh`](scripts/egress-lockdown.sh) installs an nft
-  firewall that only allows the node to reach what it needs outbound (intake,
-  DNS, NTP and, for self-update, HTTPS). Everything else new and outbound is
-  logged and dropped. Inbound attacks are untouched; only OUTPUT is filtered.
-  Applied at boot by `justdns-egress.service`.
-- [`scripts/compromise-canary.sh`](scripts/compromise-canary.sh) runs as a timer
-  (`justdns-canary.timer`) and reports unexpected outbound connections (the
-  decoys are pure servers and never call out). With `CANARY_ENFORCE=1` it stops
-  the decoys on a hit to contain the node.
+[`scripts/egress-lockdown.sh`](scripts/egress-lockdown.sh) installs an nft
+firewall that only allows the node to reach what it needs outbound (intake, DNS,
+NTP and, for self-update, HTTPS). Everything else new and outbound is logged and
+dropped. Inbound attacks are untouched; only OUTPUT is filtered. Applied at boot
+by `justdns-egress.service`.
 
 ## Without Docker (systemd)
 
