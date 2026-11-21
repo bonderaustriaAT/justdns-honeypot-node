@@ -335,29 +335,22 @@ INDEX_HTML = """<!doctype html>
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
-body{background:var(--bg);color:var(--ink);font:14px/1.45 var(--sans);display:grid;grid-template-columns:210px 1fr;overflow:hidden}
+body{background:var(--bg);color:var(--ink);font:14px/1.45 var(--sans);display:flex;flex-direction:column;overflow:hidden}
 ::selection{background:#24415a;color:#fff}
 ::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:#223040;border-radius:6px}::-webkit-scrollbar-thumb:hover{background:#2c3e50}::-webkit-scrollbar-track{background:transparent}
 a,button{color:inherit}
 :focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:4px}
 .tnum{font-variant-numeric:tabular-nums}
 .mono{font-family:var(--mono)}
-/* rail */
-aside{background:var(--panel2);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 0;min-height:0}
-.brand{display:flex;align-items:center;gap:9px;padding:4px 16px 16px;border-bottom:1px solid var(--line)}
+/* brand + status im Topbar */
+.brand{display:flex;align-items:center;gap:9px;flex:0 0 auto}
 .dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px var(--greenbg);flex:0 0 auto}
-.brand b{font-size:14px;letter-spacing:-.01em}.brand span{color:var(--dim);font:12px/1.3 var(--mono)}
-nav{padding:10px 8px;display:flex;flex-direction:column;gap:2px}
-.nav{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:7px;color:var(--mut);text-decoration:none;font-weight:500;width:100%;background:none;border:0;text-align:left;cursor:pointer;font-size:14px}
-.nav.on{background:#13202e;color:var(--ink)}.nav:hover:not(.on){background:#0f1620;color:var(--ink)}
-.nav i{width:7px;height:7px;border-radius:2px;background:currentColor;opacity:.75;flex:0 0 auto}
-.nav .ct{margin-left:auto;font:12px/1 var(--mono);color:var(--dim)}
-.rail-foot{margin-top:auto;padding:12px 16px;border-top:1px solid var(--line);color:var(--dim);font:12px/1.6 var(--mono)}
-.rail-foot b{color:var(--green);font-weight:500}
+.brand b{font-size:15px;letter-spacing:-.01em}.brand span{color:var(--dim);font:12px/1.2 var(--mono);display:block}
+.status{color:var(--dim);font:12px/1.5 var(--mono);flex:0 0 auto;padding-left:16px;border-left:1px solid var(--line)}
+.status b{color:var(--green);font-weight:500}
 /* main */
-main{display:flex;flex-direction:column;min-width:0;overflow:hidden}
-.top{display:flex;align-items:center;gap:18px;padding:12px 20px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#0e141c,#0a0d12)}
-.top h1{font-size:15px;margin:0;font-weight:600}
+main{flex:1;display:flex;flex-direction:column;min-width:0;overflow:hidden}
+.top{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#0e141c,#0a0d12)}
 .kpi{display:flex;gap:10px;margin-left:auto;flex-wrap:wrap}
 .k{min-width:96px;padding:7px 12px;border:1px solid var(--line);border-radius:9px;background:var(--panel)}
 .k .n{font:600 20px/1 var(--mono);letter-spacing:-.02em}.k .l{color:var(--mut);font-size:12px;margin-top:3px;text-transform:uppercase;letter-spacing:.06em}
@@ -404,30 +397,21 @@ td.cmd .bb{color:var(--amber)}td.cmd .dl{color:var(--red)}
 .chip b{color:var(--ink);font-weight:500}.chip .x{color:var(--mut)}
 .empty{padding:22px 14px;color:var(--dim);font-size:13px}
 @media(max-width:1100px){.grid{grid-template-columns:1fr;grid-auto-rows:minmax(220px,38vh);grid-template-rows:none}}
-@media(max-width:720px){body{grid-template-columns:1fr}aside{display:none}.kpi .l{display:none}.k{min-width:0;padding:6px 10px}}
+@media(max-width:860px){.status{display:none}}
+@media(max-width:720px){.top{flex-wrap:wrap}.kpi{margin-left:0;width:100%}.kpi .l{display:none}.k{flex:1;min-width:0;padding:6px 10px}}
 </style></head>
 <body>
 <!-- DIRECTION A: SOC CONSOLE (impeccable, operate mode)
  THESIS: a security operations console; every attacker event prioritized and status-coded so the operator scans, not reads. Refuses the four-equal-tables scroll of the old page.
  OWN-WORLD: near-black cockpit, cool slate panels, one signal palette (red Shell / amber Probe / green listed), IBM Plex Sans + Plex Mono for all data, hairline grid, sticky heads, themed scrollbars + selection.
  STORY: operator scans the KPI rail, sees who breached, drills the live shell stream, clicks any IP to filter every panel to one source.
- FIRST VIEWPORT: left rail nav + counts; top KPI strip; main grid = Live-Angriffe (left) + Shell-Aktivitaet terminal (right), Nachlade + Top-Quellen below.
+ FIRST VIEWPORT: top bar = brand + status + KPI strip; full-width grid = Live-Angriffe (left) + Shell-Aktivitaet terminal (right), Nachlade + Top-Quellen below.
  FORM: ops console. code-led, data-driven from /api/overview.
  FINISH: shipped nodeui UI. -->
-<aside>
-  <div class="brand"><span class="dot"></span><div><b>JustDNS</b><br><span>honeypot&nbsp;node</span></div></div>
-  <nav>
-    <button class="nav on" onclick="clearFilter()"><i></i>Uebersicht</button>
-    <button class="nav" onclick="scrollTo2('c-feed')"><i style="color:var(--red)"></i>Live-Angriffe <span class="ct" id="nav-ev">0</span></button>
-    <button class="nav" onclick="scrollTo2('c-shell')"><i style="color:#d39bff"></i>Shell-Aktivitaet <span class="ct" id="nav-sh">0</span></button>
-    <button class="nav" onclick="scrollTo2('c-nl')"><i style="color:var(--amber)"></i>Nachlade <span class="ct" id="nav-nl">0</span></button>
-    <button class="nav" onclick="scrollTo2('c-top')"><i style="color:var(--blue)"></i>Top-Quellen <span class="ct" id="nav-ip">0</span></button>
-  </nav>
-  <div class="rail-foot">srv-web-01<br>egress&nbsp;<b>locked</b><br>live&nbsp;&middot;&nbsp;3s</div>
-</aside>
 <main>
   <div class="top">
-    <h1>Uebersicht</h1>
+    <div class="brand"><span class="dot"></span><div><b>JustDNS</b><span>honeypot&nbsp;node</span></div></div>
+    <div class="status">srv-web-01 &middot; egress&nbsp;<b>locked</b> &middot; live&nbsp;3s</div>
     <div class="kpi">
       <div class="k red"><div class="n tnum" id="kp-shell">0</div><div class="l">in Shell</div></div>
       <div class="k amber"><div class="n tnum" id="kp-ev">0</div><div class="l">Logins</div></div>
@@ -484,23 +468,18 @@ function hl(cmd){
 }
 function setFilter(ip){ filter = (filter===ip)?null:ip; tick(); }
 function clearFilter(){ filter = null; tick(); }
-function scrollTo2(id){ const el=$(id); if(el) el.scrollIntoView({behavior:'smooth',block:'nearest'}); }
 
 async function tick(){
   let d;
   try { d = await (await fetch('/api/overview')).json(); } catch(e){ return; }
   const F = r => !filter || r.src_ip === filter;
 
-  // KPIs + Nav
+  // KPIs
   const inShell = new Set((d.shell||[]).map(r=>r.src_ip)).size;
   $('kp-shell').textContent = inShell;
   $('kp-ev').textContent = d.events_total;
   $('kp-ip').textContent = d.ips_total;
   $('kp-nl').textContent = (d.nachlade||[]).length;
-  $('nav-ev').textContent = d.events_total;
-  $('nav-sh').textContent = inShell;
-  $('nav-nl').textContent = (d.nachlade||[]).length;
-  $('nav-ip').textContent = d.ips_total;
 
   // Filter-Chip
   $('filt').innerHTML = filter
