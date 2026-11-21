@@ -228,6 +228,22 @@ def post_batch(url, token, events):
     return data
 
 
+def heartbeat(url, token):
+    """Lebenszeichen an die Intake, wenn ein Lauf nichts zu senden hatte. So
+    bleibt last_seen aktuell und ein stiller (aber lebender) Node sieht im
+    Dashboard nicht tot aus. Fehler sind unkritisch, nur Debug-Log."""
+    req = urllib.request.Request(
+        url.rstrip("/") + "/heartbeat", data=b"", method="POST",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20):
+            return True
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        log(f"Heartbeat fehlgeschlagen: {exc}")
+        return False
+
+
 def ship_file(fpath, state, parser, url, token, batch):
     """Alle neuen Events einer Datei senden. Offset erst nach Erfolg schreiben.
     Gibt (gesendet, ok) zurueck."""
@@ -285,6 +301,10 @@ def main():
             break
 
     save_state(cfg["STATE_FILE"], state)
+    # Nichts gesendet, aber Lauf ok -> Lebenszeichen, damit das Dashboard den
+    # stillen Node nicht als tot anzeigt. Bei Events setzt /events last_seen schon.
+    if all_ok and total == 0:
+        heartbeat(cfg["INTAKE_URL"], token)
     log(f"gesendet/bestaetigt: {total} Event(s)")
     return 0 if all_ok else 1
 

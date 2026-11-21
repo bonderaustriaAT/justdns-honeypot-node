@@ -82,8 +82,14 @@ git clone https://github.com/bonderaustriaAT/justdns-honeypot-node.git
 cd justdns-honeypot-node
 cp .env.example .env
 # optional: in .env einen Node-Namen (SENSOR_ID) setzen. Kein Token noetig.
+./scripts/randomize-node.sh   # einmalig: Fingerprint (Hostname, Banner) wuerfeln
 docker compose up -d
 ```
+
+`randomize-node.sh` setzt Hostname, SSH-Version und die FTP/HTTP/MySQL-Banner
+auf zufaellige, plausible Werte. So sehen mehrere Nodes nicht wie dieselbe Flotte
+aus und sind schwerer als Honeypot zu erkennen. Der Schritt ist optional, aber
+empfohlen, vor allem wenn du mehr als einen Node betreibst.
 
 Der erste Lauf baut einmalig das OpenCanary-Image und startet dann Cowrie (SSH
 auf 2222), OpenCanary (die anderen Dienste), den Shipper und die Live-Ansicht.
