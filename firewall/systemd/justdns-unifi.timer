@@ -1,0 +1,11 @@
+[Unit]
+Description=JustDNS Firewall-Reader Unifi alle 60s
+
+[Timer]
+OnBootSec=50s
+OnUnitActiveSec=60s
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

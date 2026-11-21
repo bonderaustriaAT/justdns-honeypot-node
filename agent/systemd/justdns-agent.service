@@ -1,0 +1,17 @@
+[Unit]
+Description=JustDNS Fleet-Agent (App-Ablehnungen -> Intake-API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=AGENT_CONFIG=/etc/justdns-agent.conf
+# Laeuft als root, weil App-Logs unterschiedlichen Besitzern gehoeren
+# (www-data, root, Docker-Volumes). Haertung unten: nur Logs lesen, Status
+# schreiben, zur Intake sprechen - sonst nichts.
+ExecStart=/usr/bin/python3 /opt/justdns-agent/justdns-agent.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/justdns-agent

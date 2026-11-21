@@ -202,6 +202,21 @@ one is `WEBDECOY_PERSONA` in `.env`, rolled by `randomize-node.sh`. Notes on
 running OpenCanary without Docker are in
 [opencanary/README.md](opencanary/README.md).
 
+## Optional: Fleet-Agent and firewall reader
+
+Two optional add-ons report the same way as the shipper, from sources other than
+the decoys:
+
+- **Fleet-Agent** ([`agent/`](agent/README.md)) runs on your own LXCs/VMs, tails
+  a real app's logs (nginx, Caddy, Node64, NPM, Apache, HAProxy, sshd, fail2ban)
+  and reports the IPs behind rejected or blocked requests.
+- **Firewall reader** ([`firewall/`](firewall/README.md)) reads IPS/IDS alerts and
+  firewall drops from a Unifi controller (read-only).
+
+Both are off unless you install them, self-register and need approval in the
+Intake dashboard, and never publish an IP automatically: the Intake flags
+candidates, the operator approves them, and private IPs are never published.
+
 ## Safety
 
 Everything here is a decoy. There is no real vulnerability to open, because

@@ -1,0 +1,20 @@
+# JustDNS Firewall-Reader (Unifi, nur lesen) - /etc/justdns-unifi.conf (0640 root:root).
+
+INTAKE_URL=https://intake.justdns.justfuture.at
+# Firewall-Sensor-Token. Leer -> Reader registriert sich beim ersten Lauf selbst
+# (kind=firewall) und muss danach im Dashboard freigegeben werden.
+TOKEN=
+
+UNIFI_URL=https://192.168.1.1
+# Auth: API-Key (UniFi OS, empfohlen) ODER lokales Konto (nur lesen).
+UNIFI_API_KEY=
+UNIFI_USER=
+UNIFI_PASS=
+UNIFI_SITE=default
+
+# Selbstsigniertes Controller-Zertifikat im LAN: 0. Sonst 1 (prueft Zertifikat).
+VERIFY_TLS=1
+
+NAME=UDM-Pro
+STATE_FILE=/var/lib/justdns-firewall/unifi-state.json
+LOOKBACK_MIN=60
