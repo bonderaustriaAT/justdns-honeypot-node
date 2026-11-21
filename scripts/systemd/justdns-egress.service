@@ -1,0 +1,19 @@
+[Unit]
+Description=JustDNS honeypot node egress-lockdown (nft) beim Boot setzen
+Documentation=https://github.com/bonderaustriaAT/justdns-honeypot-node
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/justdns-honeypot-node
+# Ziele hier anpassen, falls die Node nicht in der JustDNS-Infra steht:
+#   Environment=EGRESS_INTAKE=host:port
+#   Environment=EGRESS_RESOLVERS=ip,ip
+ExecStart=/opt/justdns-honeypot-node/scripts/egress-lockdown.sh
+ExecStop=/opt/justdns-honeypot-node/scripts/egress-lockdown.sh --off
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

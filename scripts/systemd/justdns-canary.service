@@ -1,0 +1,18 @@
+[Unit]
+Description=JustDNS honeypot node compromise-canary (erkennt unerwartete ausgehende Verbindungen)
+Documentation=https://github.com/bonderaustriaAT/justdns-honeypot-node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/justdns-honeypot-node
+# Enforce-Modus (Dienste bei Fund stoppen) hier aktivieren:
+#   Environment=CANARY_ENFORCE=1
+# Optionaler Alarm-Webhook:
+#   Environment=CANARY_WEBHOOK=https://...
+ExecStart=/opt/justdns-honeypot-node/scripts/compromise-canary.sh
+TimeoutStartSec=60
+# Ein Fund liefert Exit 1; das soll den Dienst nicht als "dauerhaft kaputt"
+# markieren, der Timer laeuft weiter.
+SuccessExitStatus=0 1
