@@ -251,10 +251,10 @@ INDEX_HTML = """<!doctype html>
 <body>
 <header>
   <h1>JustDNS Honeypot Node</h1>
-  <span class="stat">Neu seit Oeffnen <b id="ev">0</b></span>
+  <span class="stat">Angriffe <b id="ev">0</b></span>
   <span class="stat">Quellen <b id="ips">0</b></span>
-  <span class="stat">offen seit <b id="since">-</b></span>
-  <span class="flag">live, nur Neues &middot; 3s</span>
+  <span class="stat">Letzter <b id="since">-</b></span>
+  <span class="flag">live &middot; 3s</span>
 </header>
 <main>
   <section>
@@ -274,31 +274,22 @@ const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'
 let filter = null;
 function shortTs(t){ if(!t) return ''; return String(t).replace('T',' ').replace(/\\.\\d+/,'').replace('Z',''); }
 
-// Live-Ansicht startet LEER und zeigt nur Events, die ab dem Oeffnen der Seite
-// neu ankommen. baseline = Stand beim Oeffnen, lastSeq = schon verarbeitet.
-let baseline = null;
-let lastSeq = 0;
-const liveRows = [];        // neue Events seit Oeffnen, neueste zuerst
-const liveCounts = {};      // ip -> Anzahl (nur neue)
-const openedAt = new Date();
-
+// Node-UI zeigt IMMER alle Angriffe (der komplette Feed, neueste zuerst). Das
+// Leer-Starten gilt nur fuer die Live View im Intake-Dashboard, nicht hier.
 async function tick(){
   let d;
   try { d = await (await fetch('/api/overview')).json(); } catch(e){ return; }
-  if(baseline === null){ baseline = d.events_total; lastSeq = d.events_total; }
-  const fresh = d.feed.filter(r => (r.seq||0) > lastSeq).sort((a,b)=>a.seq-b.seq);
-  for(const r of fresh){
-    lastSeq = Math.max(lastSeq, r.seq);
-    liveRows.unshift(r);
-    liveCounts[r.src_ip] = (liveCounts[r.src_ip]||0) + 1;
+
+  const counts = {}, last = {};
+  for(const r of d.feed){
+    counts[r.src_ip] = (counts[r.src_ip]||0) + 1;
+    if(!last[r.src_ip]) last[r.src_ip] = r.ts;   // feed ist neueste zuerst
   }
-  if(liveRows.length > 400) liveRows.length = 400;
+  document.getElementById('ev').textContent = d.events_total;
+  document.getElementById('ips').textContent = Object.keys(counts).length;
+  document.getElementById('since').textContent = d.feed.length ? shortTs(d.feed[0].ts) : '-';
 
-  document.getElementById('ev').textContent = (d.events_total - baseline);
-  document.getElementById('ips').textContent = Object.keys(liveCounts).length;
-  document.getElementById('since').textContent = openedAt.toLocaleTimeString();
-
-  let rows = liveRows;
+  let rows = d.feed;
   if(filter) rows = rows.filter(r => r.src_ip === filter);
   document.getElementById('filt').textContent = filter ? ('filtered: '+filter+' (click to clear)') : '';
   let h = '';
@@ -309,13 +300,13 @@ async function tick(){
        + `<td class="muted">${esc(r.dst_port)}</td>`
        + `<td class="mono">${esc(r.username)}</td><td class="mono">${esc(r.password)}</td></tr>`;
   }
-  document.getElementById('feed').innerHTML = h || '<tr><td colspan="6" class="muted">Warte auf neue Angriffe seit dem Oeffnen&hellip;</td></tr>';
+  document.getElementById('feed').innerHTML = h || '<tr><td colspan="6" class="muted">Noch keine Angriffe&hellip;</td></tr>';
 
-  const top = Object.entries(liveCounts).sort((a,b)=>b[1]-a[1]).slice(0,20);
+  const top = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,20);
   let t = '';
   for(const [ip,count] of top){
     t += `<tr><td class="mono ip" onclick="setFilter('${esc(ip)}')">${esc(ip)}</td>`
-       + `<td>${count}</td><td class="muted"></td></tr>`;
+       + `<td>${count}</td><td class="muted mono">${esc(shortTs(last[ip]))}</td></tr>`;
   }
   document.getElementById('top').innerHTML = t || '<tr><td colspan="3" class="muted">-</td></tr>';
 }
