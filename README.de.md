@@ -26,6 +26,7 @@ anmelden. Er laeuft einfach und meldet, was er sieht.
   Cowrie      SSH                            -> cowrie.json
   OpenCanary  FTP/Telnet/MySQL/RDP/VNC/Redis -> opencanary.log
   Web-Decoy   HTTP / Docker-API / Elastic    -> webdecoy.log
+  Raw-Decoy   Postgres/MongoDB/Memcached/MQTT -> webdecoy.log
      |
      v
   Shipper  ------->  JustDNS  ------->  oeffentliche Blockliste: justdns-threat-ips
@@ -129,6 +130,10 @@ den Port, weil Cowrie auf 2222 lauscht; alles andere geht 1:1 durch.
 | HTTP (alt)    | tcp/8080                | tcp/8080                     | Web-Decoy |
 | Docker-API    | tcp/2375                | tcp/2375                     | Web-Decoy |
 | Elasticsearch | tcp/9200                | tcp/9200                     | Web-Decoy |
+| Postgres      | tcp/5432                | tcp/5432                     | Raw-Decoy |
+| MongoDB       | tcp/27017               | tcp/27017                    | Raw-Decoy |
+| Memcached     | tcp/11211               | tcp/11211                    | Raw-Decoy |
+| MQTT          | tcp/1883                | tcp/1883                     | Raw-Decoy |
 
 - **Heim-Router:** fuer jeden WAN-Port oben eine Portweiterleitung auf die
   LAN-IP dieses Hosts anlegen, Ziel ist der "weiterleiten"-Port. SSH 22 geht auf
@@ -213,9 +218,27 @@ keinem Port ein echter Dienst steckt:
   Es fuehrt keinen hochgeladenen Code aus und speichert keine Uploads.
 - Cowrie und OpenCanary sind isolierte Fake-Implementierungen; ein Login kommt
   nie in etwas Echtes hinein.
+- Das Raw-Decoy (Postgres/MongoDB/Memcached/MQTT) ist genauso reine Attrappe:
+  feste Antworten aus dem Code, keine echte DB, kein Broker, kein Dateizugriff.
+  Es schneidet nur IP und billige Credentials (Postgres-Passwort, MQTT user/pass)
+  mit.
 - Trotzdem: auf einem wegwerfbaren Host betreiben und deine eigenen echten
   Dienste auf anderen Ports halten. Ein Koeder ist nur sicher, solange nichts
   Echtes daneben liegt.
+
+### Egress-Lockdown und Compromise-Canary
+
+Zusaetzliche Absicherung fuer den Fall, dass eine Node doch kompromittiert wird:
+
+- [`scripts/egress-lockdown.sh`](scripts/egress-lockdown.sh) setzt eine
+  nft-Firewall, die der Node ausgehend nur das Noetige erlaubt (Intake, DNS, NTP
+  und - fuer das Self-Update - HTTPS). Alles andere NEUE ausgehende wird geloggt
+  und verworfen. Eingehende Angriffe bleiben unberuehrt, nur OUTPUT wird
+  gefiltert. Beim Boot per `justdns-egress.service`.
+- [`scripts/compromise-canary.sh`](scripts/compromise-canary.sh) laeuft als Timer
+  (`justdns-canary.timer`) und meldet unerwartete ausgehende Verbindungen (die
+  Decoys sind reine Server und rufen nie raus). Mit `CANARY_ENFORCE=1` stoppt er
+  bei einem Fund die Decoys, um die Node einzudaemmen.
 
 ## Ohne Docker (systemd)
 

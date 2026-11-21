@@ -26,6 +26,7 @@ just runs and reports what it sees.
   Cowrie      SSH                            -> cowrie.json
   OpenCanary  FTP/Telnet/MySQL/RDP/VNC/Redis -> opencanary.log
   web-decoy   HTTP / Docker-API / Elastic    -> webdecoy.log
+  raw-decoy   Postgres/MongoDB/Memcached/MQTT -> webdecoy.log
      |
      v
   shipper  ------->  JustDNS  ------->  public blocklist: justdns-threat-ips
@@ -127,6 +128,10 @@ ports, because Cowrie listens on 2222; everything else maps straight through.
 | HTTP (alt)    | tcp/8080            | tcp/8080             | web-decoy  |
 | Docker API    | tcp/2375            | tcp/2375             | web-decoy  |
 | Elasticsearch | tcp/9200            | tcp/9200             | web-decoy  |
+| Postgres      | tcp/5432            | tcp/5432             | raw-decoy  |
+| MongoDB       | tcp/27017           | tcp/27017            | raw-decoy  |
+| Memcached     | tcp/11211           | tcp/11211            | raw-decoy  |
+| MQTT          | tcp/1883            | tcp/1883             | raw-decoy  |
 
 - **Home router:** add a port forward for each WAN port above to this host's
   LAN IP, pointing at the "forward to" port. SSH 22 goes to 2222, the rest go
@@ -210,8 +215,26 @@ there is no real service behind any port:
   It executes no uploaded code and stores no uploaded files.
 - Cowrie and OpenCanary are isolated fake implementations; a login never
   succeeds into anything real.
+- The raw-decoy (Postgres/MongoDB/Memcached/MQTT) is pure decoy too: fixed
+  responses from the code, no real database, no broker, no filesystem access. It
+  only records the source IP and cheap credentials (Postgres password, MQTT
+  user/pass).
 - Still, run this on a disposable host and keep your own real services on other
   ports. A decoy is only safe as long as nothing real sits next to it.
+
+### Egress lockdown and compromise canary
+
+Extra defense in case a node is compromised anyway:
+
+- [`scripts/egress-lockdown.sh`](scripts/egress-lockdown.sh) installs an nft
+  firewall that only allows the node to reach what it needs outbound (intake,
+  DNS, NTP and, for self-update, HTTPS). Everything else new and outbound is
+  logged and dropped. Inbound attacks are untouched; only OUTPUT is filtered.
+  Applied at boot by `justdns-egress.service`.
+- [`scripts/compromise-canary.sh`](scripts/compromise-canary.sh) runs as a timer
+  (`justdns-canary.timer`) and reports unexpected outbound connections (the
+  decoys are pure servers and never call out). With `CANARY_ENFORCE=1` it stops
+  the decoys on a hit to contain the node.
 
 ## Without Docker (systemd)
 
