@@ -52,6 +52,8 @@ MAX_IPS = int(os.environ.get("NODEUI_MAX_IPS", "20000"))
 TAIL_BYTES = 256 * 1024   # beim ersten Lesen nur das Ende antippen
 
 COWRIE_FAILED = "cowrie.login.failed"
+COWRIE_SUCCESS = "cowrie.login.success"
+COWRIE_LOGIN = (COWRIE_FAILED, COWRIE_SUCCESS)
 PORT_SVC = {21: "FTP", 23: "TELNET", 80: "HTTP", 3306: "MYSQL",
             3389: "RDP", 5900: "VNC", 2222: "SSH", 22: "SSH"}
 
@@ -61,14 +63,16 @@ def parse_cowrie(line):
         e = json.loads(line)
     except ValueError:
         return None
-    if e.get("eventid") != COWRIE_FAILED:
+    eid = e.get("eventid")
+    if eid not in COWRIE_LOGIN:
         return None
     ip = e.get("src_ip")
     if not ip:
         return None
     return {"ts": e.get("timestamp"), "src_ip": ip, "service": "SSH",
             "dst_port": e.get("dst_port"), "username": e.get("username", ""),
-            "password": e.get("password", "")}
+            "password": e.get("password", ""),
+            "outcome": "ok" if eid == COWRIE_SUCCESS else "fail"}
 
 
 def parse_opencanary(line):
@@ -310,6 +314,7 @@ INDEX_HTML = """<!doctype html>
   tr:hover td { background:#171c24; }
   .mono { font-family: ui-monospace, monospace; font-size:13px; }
   .svc { padding:1px 7px; border-radius:10px; font-size:12px; background:#11405a; color:#8cd3ff; }
+  .in { padding:1px 7px; border-radius:10px; font-size:11px; background:#1d3a24; color:#8fe3a2; margin-left:4px; }
   .muted { color:#6b7585; }
   .ip { color:#8cd3ff; cursor:pointer; }
   .flag { float:right; font-size:12px; color:#6b7585; }
@@ -370,7 +375,7 @@ async function tick(){
   for(const r of rows){
     h += `<tr><td class="muted mono">${esc(shortTs(r.ts))}</td>`
        + `<td class="mono ip" onclick="setFilter('${esc(r.src_ip)}')">${esc(r.src_ip)}</td>`
-       + `<td><span class="svc">${esc(r.service||'?')}</span></td>`
+       + `<td><span class="svc">${esc(r.service||'?')}</span>${r.outcome==='ok'?' <span class="in">eingeloggt</span>':''}</td>`
        + `<td class="muted">${esc(r.dst_port)}</td>`
        + `<td class="mono">${esc(r.username)}</td><td class="mono">${esc(r.password)}</td></tr>`;
   }

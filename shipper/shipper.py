@@ -36,6 +36,8 @@ import urllib.error
 import urllib.request
 
 COWRIE_FAILED = "cowrie.login.failed"
+COWRIE_SUCCESS = "cowrie.login.success"
+COWRIE_LOGIN = (COWRIE_FAILED, COWRIE_SUCCESS)
 COWRIE_DL = ("cowrie.session.file_download", "cowrie.session.file_upload")
 COWRIE_CMD = "cowrie.command.input"
 PORT_SVC = {21: "FTP", 23: "TELNET", 80: "HTTP", 3306: "MYSQL",
@@ -117,7 +119,7 @@ def parse_cowrie(line):
         e = json.loads(line)
     except ValueError:
         return None
-    if e.get("eventid") != COWRIE_FAILED:
+    if e.get("eventid") not in COWRIE_LOGIN:
         return None
     ip = e.get("src_ip")
     if not ip:
