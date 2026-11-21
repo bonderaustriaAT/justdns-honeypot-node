@@ -69,7 +69,8 @@ def parse_cowrie(line):
     ip = e.get("src_ip")
     if not ip:
         return None
-    return {"ts": e.get("timestamp"), "src_ip": ip, "service": "SSH",
+    svc = "TELNET" if e.get("protocol") == "telnet" else "SSH"
+    return {"ts": e.get("timestamp"), "src_ip": ip, "service": svc,
             "dst_port": e.get("dst_port"), "username": e.get("username", ""),
             "password": e.get("password", ""),
             "outcome": "ok" if eid == COWRIE_SUCCESS else "fail"}
