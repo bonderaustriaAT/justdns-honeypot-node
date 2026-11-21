@@ -1,0 +1,11 @@
+[Unit]
+Description=JustDNS honeypot node self-update, daily
+
+[Timer]
+# Once a day, with a random delay so not every node pulls at the same minute.
+OnCalendar=daily
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

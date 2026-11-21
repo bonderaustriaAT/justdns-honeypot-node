@@ -204,11 +204,34 @@ Der Shipper braucht nur die Python-Standardbibliothek, also keine extra Pakete.
 
 ## Aktualisieren
 
+Von Hand, aus dem Repo-Verzeichnis:
+
 ```bash
-git pull
-docker compose pull
-docker compose up -d
+./scripts/self-update.sh
 ```
+
+Holt neue Commits und Images und baut nur das neu, was sich geaendert hat. Deine
+lokalen Fingerprint-Aenderungen aus `randomize-node.sh` bleiben erhalten. Der
+alte manuelle Weg geht weiter (`git pull && docker compose pull && docker compose
+up -d`).
+
+### Automatische Updates
+
+Die Node aktualisiert sich selbst, ohne Extra-Container. Den systemd-Timer einmal
+installieren (Pfad in der Unit anpassen, falls du woanders als nach
+`/opt/justdns-honeypot-node` geklont hast):
+
+```bash
+sudo cp scripts/systemd/justdns-update.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now justdns-update.timer
+```
+
+Laeuft einmal am Tag mit zufaelliger Verzoegerung. Pruefen mit
+`systemctl list-timers justdns-update.timer` und
+`journalctl -u justdns-update.service`. Die Image-Versionen bleiben gepinnt, ein
+Update bringt also nur, was in einem neuen Commit steht; nichts springt von
+selbst auf eine neue Version.
 
 ## Sicherheitshinweise
 
