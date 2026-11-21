@@ -8,9 +8,11 @@ Type=simple
 # the internal network, do not forward it from the WAN. For remote access set
 # NODEUI_TOKEN and put a TLS reverse proxy in front.
 Environment=NODEUI_BIND=0.0.0.0
-Environment=NODEUI_PORT=8080
+# 8090, weil 8080 ein Angreifer-Port des Web-Decoys ist.
+Environment=NODEUI_PORT=8090
 Environment=COWRIE_LOG=/home/cowrie/cowrie/var/log/cowrie/cowrie.json*
 Environment=OC_LOG=/var/tmp/opencanary.log*
+Environment=WEBDECOY_LOG=/var/tmp/webdecoy.log*
 # Optional: protect it with a token if you ever expose it.
 # Environment=NODEUI_TOKEN=change-me
 ExecStart=/usr/bin/python3 /opt/justdns-nodeui/nodeui.py

@@ -15,12 +15,16 @@ OOM-sicher: nur ein begrenzter Ring aktueller Events im Speicher (NODEUI_FEED),
 die Quell-IP-Zaehler sind gedeckelt (NODEUI_MAX_IPS). Beim ersten Lesen wird
 nur das Ende der Logs angetippt, nie die ganze Datei geladen.
 
+Die Live-Ansicht startet LEER und zeigt nur Events, die ab dem Oeffnen der
+Seite neu ankommen (kein Verlauf).
+
 Config (Env):
   NODEUI_BIND   Default 0.0.0.0 (aus dem internen Netz erreichbar)
-  NODEUI_PORT   Default 8080
+  NODEUI_PORT   Default 8090 (8080 ist ein Angreifer-Port des Web-Decoys)
   NODEUI_TOKEN  optional, Bearer-Token (leer = kein Token)
   COWRIE_LOG    Glob, Default /home/cowrie/cowrie/var/log/cowrie/cowrie.json*
   OC_LOG        Glob, Default /var/tmp/opencanary.log*
+  WEBDECOY_LOG  Glob, Default /var/tmp/webdecoy.log*
   NODEUI_FEED   Groesse des Live-Rings, Default 500
   NODEUI_MAX_IPS Deckel der IP-Zaehler, Default 20000
 """
@@ -35,10 +39,11 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BIND = os.environ.get("NODEUI_BIND", "0.0.0.0")
-PORT = int(os.environ.get("NODEUI_PORT", "8080"))
+PORT = int(os.environ.get("NODEUI_PORT", "8090"))
 TOKEN = os.environ.get("NODEUI_TOKEN", "")
 COWRIE_LOG = os.environ.get("COWRIE_LOG", "/home/cowrie/cowrie/var/log/cowrie/cowrie.json*")
 OC_LOG = os.environ.get("OC_LOG", "/var/tmp/opencanary.log*")
+WEBDECOY_LOG = os.environ.get("WEBDECOY_LOG", "/var/tmp/webdecoy.log*")
 FEED_MAX = int(os.environ.get("NODEUI_FEED", "500"))
 MAX_IPS = int(os.environ.get("NODEUI_MAX_IPS", "20000"))
 TAIL_BYTES = 256 * 1024   # beim ersten Lesen nur das Ende antippen
@@ -83,6 +88,19 @@ def parse_opencanary(line):
             "service": PORT_SVC.get(port, str(port) if port is not None else None),
             "dst_port": port, "username": d.get("USERNAME", ""),
             "password": d.get("PASSWORD", "")}
+
+
+def parse_webdecoy(line):
+    try:
+        e = json.loads(line)
+    except ValueError:
+        return None
+    ip = e.get("src_ip")
+    if not ip:
+        return None
+    return {"ts": e.get("ts"), "src_ip": ip, "service": e.get("service") or "HTTP",
+            "dst_port": e.get("dst_port"), "username": e.get("username", ""),
+            "password": e.get("password", "")}
 
 
 class State:
@@ -130,8 +148,9 @@ class State:
             return
 
     def _add(self, ev):
-        self.feed.append(ev)
         self.events_total += 1
+        ev["seq"] = self.events_total     # monotone Sequenz, fuer "nur neue ab Oeffnen"
+        self.feed.append(ev)
         if self.since is None and ev.get("ts"):
             self.since = ev["ts"]
         ip = ev["src_ip"]
@@ -146,7 +165,8 @@ class State:
 
     def poll(self):
         with self.lock:
-            for pattern, parser in ((COWRIE_LOG, parse_cowrie), (OC_LOG, parse_opencanary)):
+            for pattern, parser in ((COWRIE_LOG, parse_cowrie), (OC_LOG, parse_opencanary),
+                                    (WEBDECOY_LOG, parse_webdecoy)):
                 for fpath in sorted(glob.glob(pattern)):
                     self._read_file(fpath, parser)
             top = sorted(self.ip_counts.items(), key=lambda kv: kv[1][0], reverse=True)[:20]
@@ -231,10 +251,10 @@ INDEX_HTML = """<!doctype html>
 <body>
 <header>
   <h1>JustDNS Honeypot Node</h1>
-  <span class="stat">Attempts <b id="ev">0</b></span>
-  <span class="stat">Sources <b id="ips">0</b></span>
-  <span class="stat">Since <b id="since">-</b></span>
-  <span class="flag">auto-refresh 3s</span>
+  <span class="stat">Neu seit Oeffnen <b id="ev">0</b></span>
+  <span class="stat">Quellen <b id="ips">0</b></span>
+  <span class="stat">offen seit <b id="since">-</b></span>
+  <span class="flag">live, nur Neues &middot; 3s</span>
 </header>
 <main>
   <section>
@@ -254,14 +274,31 @@ const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'
 let filter = null;
 function shortTs(t){ if(!t) return ''; return String(t).replace('T',' ').replace(/\\.\\d+/,'').replace('Z',''); }
 
+// Live-Ansicht startet LEER und zeigt nur Events, die ab dem Oeffnen der Seite
+// neu ankommen. baseline = Stand beim Oeffnen, lastSeq = schon verarbeitet.
+let baseline = null;
+let lastSeq = 0;
+const liveRows = [];        // neue Events seit Oeffnen, neueste zuerst
+const liveCounts = {};      // ip -> Anzahl (nur neue)
+const openedAt = new Date();
+
 async function tick(){
   let d;
   try { d = await (await fetch('/api/overview')).json(); } catch(e){ return; }
-  document.getElementById('ev').textContent = d.events_total;
-  document.getElementById('ips').textContent = d.ips_total + (d.ips_capped?'+':'');
-  document.getElementById('since').textContent = shortTs(d.since) || '-';
+  if(baseline === null){ baseline = d.events_total; lastSeq = d.events_total; }
+  const fresh = d.feed.filter(r => (r.seq||0) > lastSeq).sort((a,b)=>a.seq-b.seq);
+  for(const r of fresh){
+    lastSeq = Math.max(lastSeq, r.seq);
+    liveRows.unshift(r);
+    liveCounts[r.src_ip] = (liveCounts[r.src_ip]||0) + 1;
+  }
+  if(liveRows.length > 400) liveRows.length = 400;
 
-  let rows = d.feed;
+  document.getElementById('ev').textContent = (d.events_total - baseline);
+  document.getElementById('ips').textContent = Object.keys(liveCounts).length;
+  document.getElementById('since').textContent = openedAt.toLocaleTimeString();
+
+  let rows = liveRows;
   if(filter) rows = rows.filter(r => r.src_ip === filter);
   document.getElementById('filt').textContent = filter ? ('filtered: '+filter+' (click to clear)') : '';
   let h = '';
@@ -272,12 +309,13 @@ async function tick(){
        + `<td class="muted">${esc(r.dst_port)}</td>`
        + `<td class="mono">${esc(r.username)}</td><td class="mono">${esc(r.password)}</td></tr>`;
   }
-  document.getElementById('feed').innerHTML = h || '<tr><td colspan="6" class="muted">No attempts yet. On a public IP this usually does not take long.</td></tr>';
+  document.getElementById('feed').innerHTML = h || '<tr><td colspan="6" class="muted">Warte auf neue Angriffe seit dem Oeffnen&hellip;</td></tr>';
 
+  const top = Object.entries(liveCounts).sort((a,b)=>b[1]-a[1]).slice(0,20);
   let t = '';
-  for(const s of d.top){
-    t += `<tr><td class="mono ip" onclick="setFilter('${esc(s.ip)}')">${esc(s.ip)}</td>`
-       + `<td>${s.count}</td><td class="muted mono">${esc(shortTs(s.last_ts))}</td></tr>`;
+  for(const [ip,count] of top){
+    t += `<tr><td class="mono ip" onclick="setFilter('${esc(ip)}')">${esc(ip)}</td>`
+       + `<td>${count}</td><td class="muted"></td></tr>`;
   }
   document.getElementById('top').innerHTML = t || '<tr><td colspan="3" class="muted">-</td></tr>';
 }
