@@ -58,13 +58,16 @@ FTP_BANNERS=(
   "FileZilla Server"
 )
 
+# Web-Decoy-Personas (muessen zu webdecoy/webdecoy.py passen).
+WEB_PERSONAS=(apache_old wordpress phpmyadmin springboot router)
+
 pick() { local a=("$@"); echo "${a[$((RANDOM % ${#a[@]}))]}"; }
 
 HOSTNAME_V=$(pick "${HOSTNAMES[@]}")
 SSH_V=$(pick "${SSH_VERSIONS[@]}")
-HTTP_V=$(pick "${HTTP_BANNERS[@]}")
 MYSQL_V=$(pick "${MYSQL_BANNERS[@]}")
 FTP_V=$(pick "${FTP_BANNERS[@]}")
+PERSONA_V=$(pick "${WEB_PERSONAS[@]}")
 NODE_ID="node-$(tr -dc 'a-f0-9' </dev/urandom | head -c 8)"
 
 # sed with | as delimiter (banners contain / but never |).
@@ -72,16 +75,29 @@ sed -i -E "s|^hostname = .*|hostname = ${HOSTNAME_V}|" "$COWRIE_CFG"
 sed -i -E "s|^version = .*|version = ${SSH_V}|" "$COWRIE_CFG"
 
 sed -i -E "s|(\"device.node_id\": )\"[^\"]*\"|\1\"${NODE_ID}\"|" "$OC_CONF"
-sed -i -E "s|(\"http.banner\": )\"[^\"]*\"|\1\"${HTTP_V}\"|" "$OC_CONF"
 sed -i -E "s|(\"mysql.banner\": )\"[^\"]*\"|\1\"${MYSQL_V}\"|" "$OC_CONF"
 sed -i -E "s|(\"ftp.banner\": )\"[^\"]*\"|\1\"${FTP_V}\"|" "$OC_CONF"
 
+# Web-Persona in die .env schreiben (die docker compose liest). Nur wenn .env da
+# ist; sonst Hinweis. Bestehende Zeile ersetzen, sonst anhaengen.
+ENV_FILE=".env"
+if [ -f "$ENV_FILE" ]; then
+  if grep -q "^WEBDECOY_PERSONA=" "$ENV_FILE"; then
+    sed -i -E "s|^WEBDECOY_PERSONA=.*|WEBDECOY_PERSONA=${PERSONA_V}|" "$ENV_FILE"
+  else
+    printf '\nWEBDECOY_PERSONA=%s\n' "$PERSONA_V" >> "$ENV_FILE"
+  fi
+  PERSONA_NOTE="(in .env gesetzt)"
+else
+  PERSONA_NOTE="(keine .env gefunden, setze WEBDECOY_PERSONA=${PERSONA_V} selbst)"
+fi
+
 echo "Node-Fingerprint neu gewuerfelt:"
-echo "  hostname    ${HOSTNAME_V}"
-echo "  ssh version ${SSH_V}"
-echo "  node_id     ${NODE_ID}"
-echo "  http        ${HTTP_V}"
-echo "  mysql       ${MYSQL_V}"
-echo "  ftp         ${FTP_V}"
+echo "  hostname     ${HOSTNAME_V}"
+echo "  ssh version  ${SSH_V}"
+echo "  node_id      ${NODE_ID}"
+echo "  mysql        ${MYSQL_V}"
+echo "  ftp          ${FTP_V}"
+echo "  web persona  ${PERSONA_V} ${PERSONA_NOTE}"
 echo
 echo "Jetzt neu starten: docker compose up -d"

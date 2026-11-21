@@ -4,11 +4,15 @@
 
 Betreibe einen kleinen Honeypot und hilf dabei, genau die Leute zu blocken, die
 ihn angreifen. Dieses Repo liefert dir einen fertigen Multi-Service-Honeypot
-(Cowrie fuer SSH, dazu OpenCanary fuer FTP, Telnet, HTTP, MySQL, RDP und VNC)
-und einen Shipper, der jeden Versuch an JustDNS meldet. Daraus entsteht die
-oeffentliche Blockliste
+(Cowrie fuer SSH; OpenCanary fuer FTP, Telnet, MySQL, RDP, VNC und Redis; ein
+Web-Decoy fuer HTTP, die Docker-API und Elasticsearch) und einen Shipper, der
+jeden Versuch an JustDNS meldet. Daraus entsteht die oeffentliche Blockliste
 [`justdns-threat-ips`](https://github.com/bonderaustriaAT/justdns-threat-ips),
 die jeder zum Filtern bekannter Angreifer nutzen kann.
+
+Jeder Dienst ist ein reiner Koeder. Er zeigt bewusst alte, "verwundbar"
+aussehende Versionen, um Angreifer anzulocken, laeuft aber nichts Echtes, es gibt
+also keine echte Luecke zum Ausnutzen. Siehe [Sicherheit](#sicherheit).
 
 Dein Node registriert sich beim ersten Start selbst, du musst dich also nirgends
 anmelden. Er laeuft einfach und meldet, was er sieht.
@@ -19,18 +23,20 @@ anmelden. Er laeuft einfach und meldet, was er sieht.
   Angreifer
      |
      v
-  Cowrie      SSH-Login-Versuche            -> cowrie.json
-  OpenCanary  FTP/Telnet/HTTP/MySQL/RDP/VNC -> opencanary.log
+  Cowrie      SSH                            -> cowrie.json
+  OpenCanary  FTP/Telnet/MySQL/RDP/VNC/Redis -> opencanary.log
+  Web-Decoy   HTTP / Docker-API / Elastic    -> webdecoy.log
      |
      v
   Shipper  ------->  JustDNS  ------->  oeffentliche Blockliste: justdns-threat-ips
 ```
 
-Hinter dem Honeypot steckt kein echter Dienst. Jeder Login scheitert mit
-Absicht, dadurch wird jeder Versuch erfasst und der Angreifer kommt nirgendwo
-hin. Der Shipper liest die Logs, buendelt das Neue und schickt es an JustDNS.
-Ist JustDNS mal nicht erreichbar, geht nichts verloren: der Shipper macht beim
-naechsten Lauf da weiter, wo er aufgehoert hat.
+Hinter dem Honeypot steckt kein echter Dienst. Jeder Login scheitert mit Absicht
+und jede "verwundbare" Seite ist eine feste Attrappe, dadurch wird jeder Versuch
+erfasst und der Angreifer kommt nirgendwo Echtes hin. Der Shipper liest die Logs,
+buendelt das Neue und schickt es an JustDNS. Ist JustDNS mal nicht erreichbar,
+geht nichts verloren: der Shipper macht beim naechsten Lauf da weiter, wo er
+aufgehoert hat.
 
 ## Was dein Node an uns sendet
 
@@ -86,10 +92,10 @@ cp .env.example .env
 docker compose up -d
 ```
 
-`randomize-node.sh` setzt Hostname, SSH-Version und die FTP/HTTP/MySQL-Banner
-auf zufaellige, plausible Werte. So sehen mehrere Nodes nicht wie dieselbe Flotte
-aus und sind schwerer als Honeypot zu erkennen. Der Schritt ist optional, aber
-empfohlen, vor allem wenn du mehr als einen Node betreibst.
+`randomize-node.sh` setzt Hostname, SSH-Version, die FTP/MySQL-Banner und die
+Web-Decoy-Persona auf zufaellige, plausible Werte. So sehen mehrere Nodes nicht
+wie dieselbe Flotte aus und sind schwerer als Honeypot zu erkennen. Der Schritt
+ist optional, aber empfohlen, vor allem wenn du mehr als einen Node betreibst.
 
 Der erste Lauf baut einmalig das OpenCanary-Image und startet dann Cowrie (SSH
 auf 2222), OpenCanary (die anderen Dienste), den Shipper und die Live-Ansicht.
@@ -110,15 +116,19 @@ Dein Node faengt nur, was ihn auch erreicht. Leite darum die Dienst-Ports vom
 WAN (Heim-Router oder Cloud-Firewall) auf diesen Host weiter. Nur SSH wechselt
 den Port, weil Cowrie auf 2222 lauscht; alles andere geht 1:1 durch.
 
-| Dienst  | Angreifer treffen (WAN) | Auf diesen Host weiterleiten | Faengt |
-|---------|-------------------------|------------------------------|--------|
-| SSH     | tcp/22                  | tcp/2222                     | Cowrie |
-| FTP     | tcp/21                  | tcp/21                       | OpenCanary |
-| Telnet  | tcp/23                  | tcp/23                       | OpenCanary |
-| HTTP    | tcp/80                  | tcp/80                       | OpenCanary |
-| MySQL   | tcp/3306                | tcp/3306                     | OpenCanary |
-| RDP     | tcp/3389                | tcp/3389                     | OpenCanary |
-| VNC     | tcp/5900                | tcp/5900                     | OpenCanary |
+| Dienst        | Angreifer treffen (WAN) | Auf diesen Host weiterleiten | Faengt |
+|---------------|-------------------------|------------------------------|--------|
+| SSH           | tcp/22                  | tcp/2222                     | Cowrie |
+| FTP           | tcp/21                  | tcp/21                       | OpenCanary |
+| Telnet        | tcp/23                  | tcp/23                       | OpenCanary |
+| MySQL         | tcp/3306                | tcp/3306                     | OpenCanary |
+| RDP           | tcp/3389                | tcp/3389                     | OpenCanary |
+| VNC           | tcp/5900                | tcp/5900                     | OpenCanary |
+| Redis         | tcp/6379                | tcp/6379                     | OpenCanary |
+| HTTP          | tcp/80                  | tcp/80                       | Web-Decoy |
+| HTTP (alt)    | tcp/8080                | tcp/8080                     | Web-Decoy |
+| Docker-API    | tcp/2375                | tcp/2375                     | Web-Decoy |
+| Elasticsearch | tcp/9200                | tcp/9200                     | Web-Decoy |
 
 - **Heim-Router:** fuer jeden WAN-Port oben eine Portweiterleitung auf die
   LAN-IP dieses Hosts anlegen, Ziel ist der "weiterleiten"-Port. SSH 22 geht auf
@@ -159,7 +169,8 @@ aktivsten Quellen daneben. Es liest dieselben Logs wie der Shipper und
 aktualisiert sich alle paar Sekunden.
 
 Mit Docker laeuft es bereits und ist aus deinem internen Netz erreichbar unter
-`http://<node-ip>:8080` (die LAN-Adresse des Nodes).
+`http://<node-ip>:8090` (die LAN-Adresse des Nodes; 8080 ist ein
+Angreifer-Port).
 
 Es zeigt Angreifer-Zugangsdaten, also halte es im internen Netz und leite es
 nicht aus dem WAN weiter. Brauchst du doch Zugriff von aussen, setze
@@ -171,19 +182,40 @@ nach `/opt/justdns-nodeui/` installieren und
 
 ## Dienste auf diesem Node
 
-Ab Werk laufen beide Honeypots, `docker compose up -d` deckt also schon ab:
+Ab Werk startet `docker compose up -d` alle drei Decoys:
 
 - **SSH** auf 2222, via Cowrie.
-- **FTP, Telnet, HTTP, MySQL, RDP, VNC**, via OpenCanary, auf ihren
+- **FTP, Telnet, MySQL, RDP, VNC, Redis**, via OpenCanary, auf ihren
   Standard-Ports.
+- **HTTP (80, 8080), Docker-API (2375), Elasticsearch (9200)**, via Web-Decoy.
+  Es zeigt pro Node eine "verwundbare" Persona und antwortet auf die Pfade, die
+  Scanner abklopfen, alles als feste Attrappen.
 
-Jeder Versuch auf einem davon wird gleich protokolliert und gesendet und taucht
-in der Live-Ansicht auf. Die OpenCanary-Config liegt in
-[`opencanary/opencanary.conf`](opencanary/opencanary.conf); setz
-`device.node_id` auf deinen eigenen Namen, wenn du magst. Einen Dienst
-abschalten: dort sein `*.enabled` auf `false` setzen und seinen Port aus der
-`docker-compose.yml` nehmen. Hinweise zum Betrieb von OpenCanary ohne Docker
-stehen in [opencanary/README.md](opencanary/README.md).
+Jeder Versuch wird protokolliert und gesendet. Die OpenCanary-Config liegt in
+[`opencanary/opencanary.conf`](opencanary/opencanary.conf) (setz `device.node_id`
+auf deinen eigenen Namen, wenn du magst); ein Protokoll abschalten: sein
+`*.enabled` auf `false` setzen und seinen Port aus der `docker-compose.yml`
+nehmen. Die Web-Personas stehen in
+[`webdecoy/webdecoy.py`](webdecoy/webdecoy.py); die aktive ist `WEBDECOY_PERSONA`
+in `.env`, gewuerfelt von `randomize-node.sh`. Hinweise zum Betrieb von
+OpenCanary ohne Docker stehen in [opencanary/README.md](opencanary/README.md).
+
+## Sicherheit
+
+Alles hier ist ein Koeder. Es gibt keine echte Luecke zum Oeffnen, weil hinter
+keinem Port ein echter Dienst steckt:
+
+- Die "verwundbaren" Versionen (altes Apache, altes Elasticsearch, eine offene
+  Docker-API und so weiter) sind nur Banner und feste Fake-Seiten. Fuer einen
+  Scanner sehen sie ausnutzbar aus, dahinter laeuft aber nichts.
+- Das Web-Decoy fasst nie die Festplatte an. Jede Antwort kommt aus einer festen
+  Map im Code, Path-Traversal wie `/../../etc/passwd` trifft also nichts Echtes.
+  Es fuehrt keinen hochgeladenen Code aus und speichert keine Uploads.
+- Cowrie und OpenCanary sind isolierte Fake-Implementierungen; ein Login kommt
+  nie in etwas Echtes hinein.
+- Trotzdem: auf einem wegwerfbaren Host betreiben und deine eigenen echten
+  Dienste auf anderen Ports halten. Ein Koeder ist nur sicher, solange nichts
+  Echtes daneben liegt.
 
 ## Ohne Docker (systemd)
 

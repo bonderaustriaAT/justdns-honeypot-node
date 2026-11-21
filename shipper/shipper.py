@@ -18,6 +18,7 @@ Config (Env ODER Datei via --config, KEY=VALUE je Zeile):
   OPERATOR     optional, Label fuers zentrale Dashboard (z.B. Kontakt/Team).
   COWRIE_LOG   Glob, Default /home/cowrie/cowrie/var/log/cowrie/cowrie.json*
   OC_LOG       Glob, Default /var/tmp/opencanary.log*
+  WEBDECOY_LOG Glob, Default /var/tmp/webdecoy.log*
   STATE_FILE   Default /var/lib/justdns-shipper/state.json
   BATCH        Events je POST-Request, Default 500
 """
@@ -43,6 +44,7 @@ DEFAULTS = {
     "INTAKE_URL": "https://intake.justdns.justfuture.at",
     "COWRIE_LOG": "/home/cowrie/cowrie/var/log/cowrie/cowrie.json*",
     "OC_LOG": "/var/tmp/opencanary.log*",
+    "WEBDECOY_LOG": "/var/tmp/webdecoy.log*",
     "STATE_FILE": "/var/lib/justdns-shipper/state.json",
     "BATCH": "500",
 }
@@ -143,6 +145,26 @@ def parse_opencanary(line):
         "dst_port": port,
         "username": d.get("USERNAME", ""),
         "password": d.get("PASSWORD", ""),
+    }
+
+
+def parse_webdecoy(line):
+    """Web-Decoy-Log (HTTP/Docker/Elasticsearch). Jede Zeile ein Request.
+    Gemeldet werden Angreifer-IP, Dienst und ggf. abgefangene Credentials."""
+    try:
+        e = json.loads(line)
+    except ValueError:
+        return None
+    ip = e.get("src_ip")
+    if not ip:
+        return None
+    return {
+        "ts": e.get("ts"),
+        "src_ip": ip,
+        "service": e.get("service") or "HTTP",
+        "dst_port": e.get("dst_port"),
+        "username": e.get("username", ""),
+        "password": e.get("password", ""),
     }
 
 
@@ -289,7 +311,8 @@ def main():
     total = 0
     all_ok = True
 
-    jobs = [(cfg["COWRIE_LOG"], parse_cowrie), (cfg["OC_LOG"], parse_opencanary)]
+    jobs = [(cfg["COWRIE_LOG"], parse_cowrie), (cfg["OC_LOG"], parse_opencanary),
+            (cfg["WEBDECOY_LOG"], parse_webdecoy)]
     for pattern, parser in jobs:
         for fpath in sorted(glob.glob(pattern)):
             sent, ok = ship_file(fpath, state, parser, cfg["INTAKE_URL"], token, batch)

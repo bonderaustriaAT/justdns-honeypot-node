@@ -3,11 +3,16 @@
 *Deutsch: [README.de.md](README.de.md)*
 
 Run a small honeypot, help block the people who attack it. This repo gives you
-a ready to run multi-service honeypot (Cowrie for SSH, plus OpenCanary for FTP,
-Telnet, HTTP, MySQL, RDP and VNC) and a shipper that forwards every attempt to
-JustDNS. Those attacker IPs become the public blocklist
+a ready to run multi-service honeypot (Cowrie for SSH; OpenCanary for FTP,
+Telnet, MySQL, RDP, VNC and Redis; a web-decoy for HTTP, the Docker API and
+Elasticsearch) and a shipper that forwards every attempt to JustDNS. Those
+attacker IPs become the public blocklist
 [`justdns-threat-ips`](https://github.com/bonderaustriaAT/justdns-threat-ips),
 which anyone can use to filter known attackers.
+
+Every service is a pure decoy. It shows deliberately old, "vulnerable" looking
+versions to draw attackers in, but it runs nothing real, so there is no actual
+vulnerability to exploit. See [Safety](#safety).
 
 Your node registers itself on first run, so there is nothing to sign up for. It
 just runs and reports what it sees.
@@ -18,18 +23,19 @@ just runs and reports what it sees.
   attacker
      |
      v
-  Cowrie      SSH login attempts            -> cowrie.json
-  OpenCanary  FTP/Telnet/HTTP/MySQL/RDP/VNC -> opencanary.log
+  Cowrie      SSH                            -> cowrie.json
+  OpenCanary  FTP/Telnet/MySQL/RDP/VNC/Redis -> opencanary.log
+  web-decoy   HTTP / Docker-API / Elastic    -> webdecoy.log
      |
      v
   shipper  ------->  JustDNS  ------->  public blocklist: justdns-threat-ips
 ```
 
-The honeypot has no real service behind it. Every login fails on purpose, so
-each attempt is recorded and the attacker never reaches anything. The shipper
-tails the logs, batches what is new, and sends it to JustDNS. If JustDNS is
-unreachable, nothing is lost: the shipper picks up where it left off on the next
-run.
+The honeypot has no real service behind it. Every login fails on purpose and
+every "vulnerable" page is a fixed fake, so each attempt is recorded and the
+attacker never reaches anything real. The shipper tails the logs, batches what
+is new, and sends it to JustDNS. If JustDNS is unreachable, nothing is lost: the
+shipper picks up where it left off on the next run.
 
 ## What your node sends to us
 
@@ -84,10 +90,10 @@ cp .env.example .env
 docker compose up -d
 ```
 
-`randomize-node.sh` sets the hostname, SSH version and the FTP/HTTP/MySQL
-banners to random, plausible values, so several nodes do not look like the same
-fleet and are harder to spot as a honeypot. It is optional but recommended,
-especially if you run more than one node.
+`randomize-node.sh` sets the hostname, SSH version, the FTP/MySQL banners and
+the web-decoy persona to random, plausible values, so several nodes do not look
+like the same fleet and are harder to spot as a honeypot. It is optional but
+recommended, especially if you run more than one node.
 
 The first run builds the OpenCanary image once, then starts Cowrie (SSH on
 2222), OpenCanary (the other services), the shipper and the live view.
@@ -108,15 +114,19 @@ Your node only catches what actually reaches it, so forward the service ports
 from your WAN (home router or cloud firewall) to this host. Only SSH shifts
 ports, because Cowrie listens on 2222; everything else maps straight through.
 
-| Service | Attackers hit (WAN) | Forward to this host | Handled by |
-|---------|---------------------|----------------------|------------|
-| SSH     | tcp/22              | tcp/2222             | Cowrie     |
-| FTP     | tcp/21              | tcp/21               | OpenCanary |
-| Telnet  | tcp/23              | tcp/23               | OpenCanary |
-| HTTP    | tcp/80              | tcp/80               | OpenCanary |
-| MySQL   | tcp/3306            | tcp/3306             | OpenCanary |
-| RDP     | tcp/3389            | tcp/3389             | OpenCanary |
-| VNC     | tcp/5900            | tcp/5900             | OpenCanary |
+| Service       | Attackers hit (WAN) | Forward to this host | Handled by |
+|---------------|---------------------|----------------------|------------|
+| SSH           | tcp/22              | tcp/2222             | Cowrie     |
+| FTP           | tcp/21              | tcp/21               | OpenCanary |
+| Telnet        | tcp/23              | tcp/23               | OpenCanary |
+| MySQL         | tcp/3306            | tcp/3306             | OpenCanary |
+| RDP           | tcp/3389            | tcp/3389             | OpenCanary |
+| VNC           | tcp/5900            | tcp/5900             | OpenCanary |
+| Redis         | tcp/6379            | tcp/6379             | OpenCanary |
+| HTTP          | tcp/80              | tcp/80               | web-decoy  |
+| HTTP (alt)    | tcp/8080            | tcp/8080             | web-decoy  |
+| Docker API    | tcp/2375            | tcp/2375             | web-decoy  |
+| Elasticsearch | tcp/9200            | tcp/9200             | web-decoy  |
 
 - **Home router:** add a port forward for each WAN port above to this host's
   LAN IP, pointing at the "forward to" port. SSH 22 goes to 2222, the rest go
@@ -156,7 +166,8 @@ passwords the attackers tried, with the busiest sources listed on the side. It
 reads the same logs as the shipper and refreshes every few seconds.
 
 With Docker it is already running and reachable from your internal network at
-`http://<node-ip>:8080` (the node's LAN address).
+`http://<node-ip>:8090` (the node's LAN address; 8080 is an attacker-facing
+decoy port).
 
 It shows attacker credentials, so keep it on your internal network and do not
 forward it from the WAN. If you do need remote access, set `NODEUI_TOKEN` in
@@ -168,20 +179,39 @@ On a bare host (systemd) run it the same way as the shipper: install
 
 ## Services on this node
 
-Out of the box the node runs both honeypots, so `docker compose up -d` already
-covers:
+Out of the box `docker compose up -d` runs all three decoys:
 
 - **SSH** on 2222, via Cowrie.
-- **FTP, Telnet, HTTP, MySQL, RDP, VNC**, via OpenCanary, on their standard
+- **FTP, Telnet, MySQL, RDP, VNC, Redis**, via OpenCanary, on their standard
   ports.
+- **HTTP (80, 8080), Docker API (2375), Elasticsearch (9200)**, via the
+  web-decoy. It shows a per-node "vulnerable" persona and answers the paths
+  scanners probe, all as fixed fakes.
 
-Every attempt on any of them is logged and shipped the same way, and shows up
-in the live view. The OpenCanary config is in
-[`opencanary/opencanary.conf`](opencanary/opencanary.conf); set
-`device.node_id` to your own name if you like. To switch a service off, set its
-`*.enabled` to `false` there and drop its port from `docker-compose.yml`. Notes
-on the bare-metal (non-Docker) way to run OpenCanary are in
+Every attempt on any of them is logged and shipped the same way. The OpenCanary
+config is in [`opencanary/opencanary.conf`](opencanary/opencanary.conf) (set
+`device.node_id` to your own name if you like); switch a protocol off by setting
+its `*.enabled` to `false` and dropping its port from `docker-compose.yml`. The
+web personas live in [`webdecoy/webdecoy.py`](webdecoy/webdecoy.py); the active
+one is `WEBDECOY_PERSONA` in `.env`, rolled by `randomize-node.sh`. Notes on
+running OpenCanary without Docker are in
 [opencanary/README.md](opencanary/README.md).
+
+## Safety
+
+Everything here is a decoy. There is no real vulnerability to open, because
+there is no real service behind any port:
+
+- The "vulnerable" versions (old Apache, old Elasticsearch, an open Docker API,
+  and so on) are just banners and fixed fake pages. They look exploitable to a
+  scanner, but nothing runs behind them.
+- The web-decoy never touches the filesystem. Every response comes from a fixed
+  map in the code, so path traversal like `/../../etc/passwd` hits nothing real.
+  It executes no uploaded code and stores no uploaded files.
+- Cowrie and OpenCanary are isolated fake implementations; a login never
+  succeeds into anything real.
+- Still, run this on a disposable host and keep your own real services on other
+  ports. A decoy is only safe as long as nothing real sits next to it.
 
 ## Without Docker (systemd)
 

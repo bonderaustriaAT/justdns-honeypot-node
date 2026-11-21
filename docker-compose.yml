@@ -1,6 +1,7 @@
-# JustDNS honeypot node: Cowrie (SSH) plus OpenCanary (FTP, Telnet, HTTP,
-# MySQL, RDP, VNC), the shipper that forwards attacker attempts to the JustDNS
-# intake, and a live view (nodeui, on http://<node-ip>:8080). Copy
+# JustDNS honeypot node: Cowrie (SSH), OpenCanary (FTP, Telnet, MySQL, RDP, VNC,
+# Redis), the web-decoy (HTTP, Docker-API, Elasticsearch, with randomized
+# "vulnerable" personas), the shipper that forwards attacker attempts to the
+# JustDNS intake, and a live view (nodeui, on http://<node-ip>:8090). Copy
 # .env.example to .env, then:
 #
 #   docker compose up -d
@@ -22,10 +23,11 @@ services:
       - ./cowrie/userdb.txt:/cowrie/cowrie-git/etc/userdb.txt:ro
       - cowrie-logs:/cowrie/cowrie-git/var/log/cowrie
 
-  # Multi-service decoy next to Cowrie: FTP, Telnet, HTTP, MySQL, RDP, VNC.
-  # Built once from ./opencanary (OpenCanary has no official image). The host
-  # ports map 1:1 so attackers hitting those ports land here; forward them from
-  # the WAN as shown in the README port table.
+  # Protocol decoys next to Cowrie: FTP, Telnet, MySQL, RDP, VNC, Redis. Fake
+  # implementations, they log attempts and never run a real service. Built once
+  # from ./opencanary (OpenCanary has no official image). HTTP is handled by the
+  # richer web-decoy below, not here. Host ports map 1:1; forward them from the
+  # WAN as shown in the README port table.
   opencanary:
     build: ./opencanary
     restart: unless-stopped
@@ -33,13 +35,38 @@ services:
     ports:
       - "${FTP_PORT:-21}:21"
       - "${TELNET_PORT:-23}:23"
-      - "${OC_HTTP_PORT:-80}:80"
       - "${MYSQL_PORT:-3306}:3306"
       - "${RDP_PORT:-3389}:3389"
       - "${VNC_PORT:-5900}:5900"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - ./opencanary/opencanary.conf:/etc/opencanaryd/opencanary.conf:ro
       - opencanary-logs:/var/tmp
+
+  # Web-decoy for the HTTP family: a plain HTTP site (80, 8080), a fake Docker
+  # API (2375) and a fake Elasticsearch (9200). It shows deliberately old,
+  # "vulnerable" looking versions and answers the paths scanners probe, but it
+  # is PURE DECOY: it runs nothing, never touches the filesystem, and only logs.
+  # The web persona is rolled per node by randomize-node.sh (WEBDECOY_PERSONA).
+  webdecoy:
+    image: python:3.12-slim
+    restart: unless-stopped
+    mem_limit: 128m
+    environment:
+      WEBDECOY_WEB_PORTS: "80,8080"
+      WEBDECOY_DOCKER_PORT: "2375"
+      WEBDECOY_ELASTIC_PORT: "9200"
+      WEBDECOY_PERSONA: ${WEBDECOY_PERSONA:-}
+      WEBDECOY_LOG: /var/tmp/webdecoy.log
+    volumes:
+      - ./webdecoy/webdecoy.py:/app/webdecoy.py:ro
+      - webdecoy-logs:/var/tmp
+    ports:
+      - "${WEB_HTTP_PORT:-80}:80"
+      - "${WEB_ALT_PORT:-8080}:8080"
+      - "${DOCKER_DECOY_PORT:-2375}:2375"
+      - "${ELASTIC_DECOY_PORT:-9200}:9200"
+    command: ["python", "/app/webdecoy.py"]
 
   shipper:
     image: python:3.12-slim
@@ -48,6 +75,7 @@ services:
     depends_on:
       - cowrie
       - opencanary
+      - webdecoy
     environment:
       SENSOR_ID: ${SENSOR_ID:-}
       OPERATOR: ${OPERATOR:-}
@@ -55,6 +83,7 @@ services:
       INTAKE_URL: ${INTAKE_URL:-https://intake.justdns.justfuture.at}
       COWRIE_LOG: /logs/cowrie/cowrie.json*
       OC_LOG: /logs/opencanary/opencanary.log*
+      WEBDECOY_LOG: /logs/webdecoy/webdecoy.log*
       STATE_FILE: /state/state.json
       BATCH: "500"
       SHIPPER_INTERVAL: "120"
@@ -62,13 +91,15 @@ services:
       - ./shipper/shipper.py:/app/shipper.py:ro
       - cowrie-logs:/logs/cowrie:ro
       - opencanary-logs:/logs/opencanary:ro
+      - webdecoy-logs:/logs/webdecoy:ro
       - shipper-state:/state
     command: ["sh", "-c", "while true; do python /app/shipper.py --config /dev/null; sleep $$SHIPPER_INTERVAL; done"]
 
   # Live view of attacks on THIS node, incl. tried credentials. Reachable from
-  # the internal network at http://<node-ip>:8080. It shows attacker
-  # credentials, so keep it on the internal network and do not forward it from
-  # the WAN. For remote access set NODEUI_TOKEN and put TLS in front.
+  # the internal network at http://<node-ip>:8090 (8080 is an attacker-facing
+  # decoy port). It shows attacker credentials, so keep it on the internal
+  # network and do not forward it from the WAN. For remote access set
+  # NODEUI_TOKEN and put TLS in front.
   nodeui:
     image: python:3.12-slim
     restart: unless-stopped
@@ -85,10 +116,11 @@ services:
       - cowrie-logs:/logs/cowrie:ro
       - opencanary-logs:/logs/opencanary:ro
     ports:
-      - "${NODEUI_PORT:-8080}:8080"
+      - "${NODEUI_PORT:-8090}:8080"
     command: ["python", "/app/nodeui.py"]
 
 volumes:
   cowrie-logs:
   opencanary-logs:
+  webdecoy-logs:
   shipper-state:
