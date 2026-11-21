@@ -68,6 +68,31 @@ services:
       - "${ELASTIC_DECOY_PORT:-9200}:9200"
     command: ["python", "/app/webdecoy.py"]
 
+  # Raw-decoy for the most-scanned non-HTTP services: Postgres (5432), MongoDB
+  # (27017), Memcached (11211), MQTT (1883). PURE DECOY like the web-decoy: runs
+  # nothing, never touches the filesystem, only logs the source IP and any cheap
+  # credentials (Postgres password, MQTT user/pass). Writes into the same
+  # webdecoy log so the shipper and nodeui pick it up unchanged.
+  rawdecoy:
+    image: python:3.12-slim
+    restart: unless-stopped
+    mem_limit: 128m
+    environment:
+      RAWDECOY_PG_PORT: "5432"
+      RAWDECOY_MONGO_PORT: "27017"
+      RAWDECOY_MEMCACHED_PORT: "11211"
+      RAWDECOY_MQTT_PORT: "1883"
+      RAWDECOY_LOG: /var/tmp/webdecoy.log
+    volumes:
+      - ./rawdecoy/rawdecoy.py:/app/rawdecoy.py:ro
+      - webdecoy-logs:/var/tmp
+    ports:
+      - "${PG_DECOY_PORT:-5432}:5432"
+      - "${MONGO_DECOY_PORT:-27017}:27017"
+      - "${MEMCACHED_DECOY_PORT:-11211}:11211"
+      - "${MQTT_DECOY_PORT:-1883}:1883"
+    command: ["python", "/app/rawdecoy.py"]
+
   shipper:
     image: python:3.12-slim
     restart: unless-stopped
@@ -76,6 +101,7 @@ services:
       - cowrie
       - opencanary
       - webdecoy
+      - rawdecoy
     environment:
       SENSOR_ID: ${SENSOR_ID:-}
       OPERATOR: ${OPERATOR:-}
@@ -111,10 +137,12 @@ services:
       NODEUI_TOKEN: ${NODEUI_TOKEN:-}
       COWRIE_LOG: /logs/cowrie/cowrie.json*
       OC_LOG: /logs/opencanary/opencanary.log*
+      WEBDECOY_LOG: /logs/webdecoy/webdecoy.log*
     volumes:
       - ./nodeui/nodeui.py:/app/nodeui.py:ro
       - cowrie-logs:/logs/cowrie:ro
       - opencanary-logs:/logs/opencanary:ro
+      - webdecoy-logs:/logs/webdecoy:ro
     ports:
       - "${NODEUI_PORT:-8090}:8080"
     command: ["python", "/app/nodeui.py"]

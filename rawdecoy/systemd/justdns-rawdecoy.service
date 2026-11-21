@@ -1,0 +1,27 @@
+[Unit]
+Description=JustDNS honeypot node raw-decoy (Postgres, MongoDB, Memcached, MQTT)
+Documentation=https://github.com/bonderaustriaAT/justdns-honeypot-node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Ports. Leer setzen (Environment=RAWDECOY_X_PORT=) schaltet einen Dienst ab,
+# falls der Port auf diesem Host schon belegt ist.
+Environment=RAWDECOY_PG_PORT=5432
+Environment=RAWDECOY_MONGO_PORT=27017
+Environment=RAWDECOY_MEMCACHED_PORT=11211
+Environment=RAWDECOY_MQTT_PORT=1883
+Environment=RAWDECOY_BIND=0.0.0.0
+Environment=RAWDECOY_LOG=/var/tmp/webdecoy.log
+ExecStart=/usr/bin/python3 /opt/justdns-rawdecoy/rawdecoy.py
+Restart=on-failure
+RestartSec=5
+User=cowrie
+Group=cowrie
+# Alle Ports sind > 1024, also keine CAP_NET_BIND_SERVICE noetig.
+NoNewPrivileges=true
+UMask=0022
+
+[Install]
+WantedBy=multi-user.target
