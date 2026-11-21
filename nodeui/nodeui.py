@@ -333,7 +333,7 @@ INDEX_HTML = """<!doctype html>
 <main>
   <section>
     <h2>Live attacks <span id="filt" class="muted"></span></h2>
-    <table><thead><tr><th>Time (UTC)</th><th>Source IP</th><th>Service</th>
+    <table><thead><tr><th>Zeit (Wien)</th><th>Source IP</th><th>Service</th>
       <th>Port</th><th>Username</th><th>Password</th></tr></thead>
       <tbody id="feed"></tbody></table>
   </section>
@@ -344,14 +344,25 @@ INDEX_HTML = """<!doctype html>
   </section>
   <section style="grid-column:1/-1">
     <h2>Nachlade-Versuche <span class="muted">wget / curl / Download</span></h2>
-    <table><thead><tr><th>Time (UTC)</th><th>Source IP</th><th>Domains</th><th>Command</th></tr></thead>
+    <table><thead><tr><th>Zeit (Wien)</th><th>Source IP</th><th>Domains</th><th>Command</th></tr></thead>
       <tbody id="nl"></tbody></table>
   </section>
 </main>
 <script>
 const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let filter = null;
-function shortTs(t){ if(!t) return ''; return String(t).replace('T',' ').replace(/\\.\\d+/,'').replace('Z',''); }
+// Alle ts kommen als UTC (cowrie "...Z", opencanary "YYYY-MM-DD HH:MM:SS").
+// DST-korrekt in Wien-Zeit anzeigen, unabhaengig von der Browser-Zeitzone.
+const VIENNA = new Intl.DateTimeFormat('de-AT', {timeZone:'Europe/Vienna',
+  year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+function shortTs(t){
+  if(!t) return '';
+  let s = String(t).trim();
+  if(/^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}/.test(s)) s = s.replace(' ','T');
+  if(!/[Zz]|[+\\-]\\d{2}:?\\d{2}$/.test(s)) s += 'Z';   // ohne Zone -> als UTC lesen
+  const d = new Date(s);
+  return isNaN(d) ? String(t) : VIENNA.format(d).replace(',', '');
+}
 
 // Node-UI zeigt IMMER alle Angriffe (der komplette Feed, neueste zuerst). Das
 // Leer-Starten gilt nur fuer die Live View im Intake-Dashboard, nicht hier.
