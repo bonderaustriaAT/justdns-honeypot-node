@@ -5,21 +5,28 @@ After=network.target
 [Service]
 Type=simple
 # Reachable from the internal network. It shows attacker credentials: keep it on
-# the internal network, do not forward it from the WAN. For remote access set
-# NODEUI_TOKEN and put a TLS reverse proxy in front.
+# the internal network, do not forward it from the WAN. Access is gated by a login:
+# on first start create the admin under http://<node>:8090/setup. If you expose it,
+# put a TLS reverse proxy in front and set NODEUI_SECURE_COOKIE=1.
 Environment=NODEUI_BIND=0.0.0.0
 # 8090, weil 8080 ein Angreifer-Port des Web-Decoys ist.
 Environment=NODEUI_PORT=8090
 Environment=COWRIE_LOG=/home/cowrie/cowrie/var/log/cowrie/cowrie.json*
 Environment=OC_LOG=/var/tmp/opencanary.log*
 Environment=WEBDECOY_LOG=/var/tmp/webdecoy.log*
-# Optional: protect it with a token if you ever expose it.
+# Eigenstaendiger Auth-Store dieser Node (getrennt von jeder anderen Node):
+Environment=NODEUI_AUTH_DB=/var/lib/justdns-nodeui/auth.db
+# Optionaler Legacy-Bearer nur fuer API-Reads (UI nutzt Login-Sessions):
 # Environment=NODEUI_TOKEN=change-me
+# Hinter TLS-Proxy zusaetzlich: Environment=NODEUI_SECURE_COOKIE=1
 ExecStart=/usr/bin/python3 /opt/justdns-nodeui/nodeui.py
 Restart=on-failure
 RestartSec=5
 User=cowrie
 Group=cowrie
+# Legt /var/lib/justdns-nodeui an (Eigentuemer cowrie), fuer die Auth-DB:
+StateDirectory=justdns-nodeui
+StateDirectoryMode=0700
 UMask=0077
 NoNewPrivileges=true
 
