@@ -446,6 +446,18 @@ class SensorLog:
                 s["count"] = s.get("count", 0) + len(events)
                 self._save()
 
+    def remove(self, sid):
+        """Sensor manuell aus dem Protokoll loeschen: Eintrag + zugehoerige Tokens
+        raus. Die Feed-Historie bleibt (laeuft von selbst aus dem Ringpuffer)."""
+        with self.lock:
+            if sid not in self.sensors:
+                return False
+            self.sensors.pop(sid, None)
+            for tok in [t for t, s in self.by_token.items() if s == sid]:
+                self.by_token.pop(tok, None)
+            self._save()
+            return True
+
     def view(self):
         with self.lock:
             sensors = sorted(self.sensors.values(),
@@ -454,6 +466,30 @@ class SensorLog:
 
 
 SENSORS = SensorLog(os.path.join(FW_DIR, "sensors.json"))
+
+
+def teardown_firewall(sid):
+    """Gehoert die geloeschte Sensor-ID zu einer Firewall-/node64-Direktanbindung,
+    deren Config + Status entfernen, damit der Timer nichts mehr abfragt."""
+    pairs = (
+        (UNIFI_CONFIG, FW_STATE, os.path.join(FW_DIR, "unifi-state.json")),
+        (NODE64_CONFIG, NODE64_STATE, os.path.join(FW_DIR, "node64-state.json")),
+    )
+    removed = False
+    for conf, state, reader_state in pairs:
+        try:
+            with open(state, encoding="utf-8") as fh:
+                if json.load(fh).get("sensor_id") != sid:
+                    continue
+        except (OSError, ValueError):
+            continue
+        for fpath in (conf, state, reader_state):
+            try:
+                os.remove(fpath)
+            except OSError:
+                pass
+        removed = True
+    return removed
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -533,6 +569,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/node64/connect":
             self._n64_connect()
+            return
+        if path == "/api/sensors/remove":
+            self._sensor_remove()
             return
         self._send(404, {"error": "not_found"})
 
@@ -768,6 +807,28 @@ class Handler(BaseHTTPRequestHandler):
             except subprocess.SubprocessError as exc:
                 detail = str(exc)[:160]
         return detail
+
+    def _sensor_remove(self):
+        """Sensor aus dem Protokoll loeschen. Bei einer Firewall-/node64-Direkt-
+        anbindung zusaetzlich deren Config + Status abschalten."""
+        try:
+            d = json.loads(self._body() or b"{}")
+        except ValueError:
+            self._send(400, {"ok": False, "message": "Ungueltige Anfrage."})
+            return
+        sid = (d.get("sensor_id") or "").strip()
+        if not sid:
+            self._send(400, {"ok": False, "message": "Sensor-ID fehlt."})
+            return
+        ok = SENSORS.remove(sid)
+        fw = teardown_firewall(sid)
+        if not ok and not fw:
+            self._send(404, {"ok": False, "message": "Sensor nicht gefunden."})
+            return
+        msg = "Sensor entfernt."
+        if fw:
+            msg += " Direktanbindung abgeschaltet, der Timer fragt nichts mehr ab."
+        self._send(200, {"ok": True, "message": msg})
 
 
 INDEX_HTML = """<!doctype html>
@@ -1184,6 +1245,10 @@ tbody tr:hover td{background:#121a24}
 .r{display:inline-block;padding:1px 8px;border-radius:999px;font:500 12px/1.6 var(--mono);background:#1d2530;color:var(--mut)}
 .r.ips_alert{background:#2a1217;color:var(--red)}.r.fw_drop{background:#2a2111;color:var(--amber)}
 .empty{padding:22px 15px;color:var(--dim);font-size:13px}
+td.act{text-align:right;padding-right:15px}
+.del{font:500 12px/1 var(--mono);color:var(--mut);background:transparent;border:1px solid var(--line2);border-radius:7px;padding:5px 10px;cursor:pointer}
+.del:hover{border-color:var(--red);color:var(--red)}
+.del:disabled{opacity:.5;cursor:default}
 </style></head>
 <body><div class="wrap">
   <div class="top"><span class="dot"></span><div><b>JustDNS</b> <span class="sub">honeypot node</span></div>
@@ -1192,7 +1257,7 @@ tbody tr:hover td{background:#121a24}
   <div class="card">
     <div class="ch"><h2>Angebundene Sensoren</h2><span class="live" id="sc"></span></div>
     <div class="scroll"><table>
-      <thead><tr><th>Typ</th><th>Host / Quelle</th><th>App</th><th>Sensor-ID</th><th>Meldungen</th><th>Zuletzt (Wien)</th></tr></thead>
+      <thead><tr><th>Typ</th><th>Host / Quelle</th><th>App</th><th>Sensor-ID</th><th>Meldungen</th><th>Zuletzt (Wien)</th><th></th></tr></thead>
       <tbody id="sensors"></tbody></table></div>
   </div>
 
@@ -1221,9 +1286,10 @@ async function tick(){
       +`<td class="mono">${esc(s.app)||'<span class="muted">-</span>'}</td>`
       +`<td class="mono muted">${esc(s.sensor_id)}</td>`
       +`<td class="mono">${s.count||0}</td>`
-      +`<td class="mono muted">${esc(ts(s.last_ts))}</td></tr>`;
+      +`<td class="mono muted">${esc(ts(s.last_ts))}</td>`
+      +`<td class="act"><button class="del" data-sid="${esc(s.sensor_id)}" data-host="${esc(s.host||s.app||s.sensor_id)}">Entfernen</button></td></tr>`;
   }
-  $('sensors').innerHTML = h || '<tr><td colspan="6" class="empty">Noch keine Sensoren angebunden. Unter &bdquo;+ Sensor anbinden&ldquo; einen Agent ausrollen oder die Firewall verbinden.</td></tr>';
+  $('sensors').innerHTML = h || '<tr><td colspan="7" class="empty">Noch keine Sensoren angebunden. Unter &bdquo;+ Sensor anbinden&ldquo; einen Agent ausrollen oder die Firewall verbinden.</td></tr>';
   const feed=d.feed||[];
   $('fc').textContent = feed.length ? (feed.length+' Meldungen') : '';
   let f='';
@@ -1237,6 +1303,19 @@ async function tick(){
   }
   $('feed').innerHTML = f || '<tr><td colspan="5" class="empty">Noch keine gemeldeten Zugriffe.</td></tr>';
 }
+let busy=false;
+$('sensors').addEventListener('click', async e=>{
+  const b=e.target.closest('.del'); if(!b||busy) return;
+  const sid=b.dataset.sid, host=b.dataset.host||sid;
+  if(!confirm('Sensor „'+host+'“ entfernen? Eine verbundene Firewall-/node64-Direktanbindung wird dabei abgeschaltet.')) return;
+  busy=true; b.disabled=true; b.textContent='…';
+  try{
+    const r=await fetch('/api/sensors/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sensor_id:sid})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||!j.ok){ alert(j.message||'Entfernen fehlgeschlagen.'); b.disabled=false; b.textContent='Entfernen'; }
+  }catch(err){ alert('Entfernen fehlgeschlagen: '+err); b.disabled=false; b.textContent='Entfernen'; }
+  busy=false; tick();
+});
 tick(); setInterval(tick,3000);
 </script>
 </body></html>"""
