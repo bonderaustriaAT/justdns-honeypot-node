@@ -38,8 +38,13 @@ import ipaddress
 import json
 import os
 import re
+import secrets
+import ssl
+import subprocess
 import threading
+import urllib.error
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BIND = os.environ.get("NODEUI_BIND", "0.0.0.0")
@@ -51,6 +56,25 @@ WEBDECOY_LOG = os.environ.get("WEBDECOY_LOG", "/var/tmp/webdecoy.log*")
 FEED_MAX = int(os.environ.get("NODEUI_FEED", "500"))
 MAX_IPS = int(os.environ.get("NODEUI_MAX_IPS", "20000"))
 TAIL_BYTES = 256 * 1024   # beim ersten Lesen nur das Ende antippen
+# Zentrale Intake, an die diese Node die gesammelten Meldungen weiterleitet.
+INTAKE_URL = os.environ.get("NODEUI_INTAKE_URL", "https://intake.justdns.justfuture.at").rstrip("/")
+# Ausgelieferte Sensor-Dateien (install.sh, agent.py, unifi_reader.py).
+DIST = os.environ.get("NODEUI_DIST", "/opt/justdns-nodeui/dist")
+# Firewall-Direktanbindung: von der Node selbst abgefragt. Config liegt in einem
+# fuer den nodeui-Benutzer schreibbaren Verzeichnis (kein root zur Laufzeit noetig);
+# der periodische Timer wird einmal beim Deploy eingerichtet.
+FW_DIR = os.environ.get("NODEUI_FW_DIR", "/var/lib/justdns-firewall")
+UNIFI_CONFIG = os.environ.get("NODEUI_UNIFI_CONFIG", os.path.join(FW_DIR, "unifi.conf"))
+UNIFI_READER = os.environ.get("NODEUI_UNIFI_READER", "/opt/justdns-firewall/unifi_reader.py")
+FW_STATE = os.environ.get("NODEUI_FW_STATE", os.path.join(FW_DIR, "connect.json"))
+# node64-Direktanbindung (PROXY64/CDN64-Zugriffslog, nur lesen): gleiche Mechanik
+# wie die Firewall - Config im nodeui-schreibbaren Verzeichnis, Timer beim Deploy.
+NODE64_CONFIG = os.environ.get("NODEUI_NODE64_CONFIG", os.path.join(FW_DIR, "node64.conf"))
+NODE64_READER = os.environ.get("NODEUI_NODE64_READER", "/opt/justdns-firewall/node64_reader.py")
+NODE64_STATE = os.environ.get("NODEUI_NODE64_STATE", os.path.join(FW_DIR, "node64-connect.json"))
+# Identitaet DIESER Honeypot-Node an der Intake (aus der Shipper-Config): Agents und
+# Firewall melden lokal an die Node, ihre IPs gehen unter dieser Node-Identitaet raus.
+SHIPPER_CONFIG = os.environ.get("NODEUI_SHIPPER_CONFIG", "/etc/justdns-shipper.conf")
 
 COWRIE_FAILED = "cowrie.login.failed"
 COWRIE_SUCCESS = "cowrie.login.success"
@@ -279,6 +303,201 @@ class State:
 STATE = State()
 
 
+def _http(url, data=None, headers=None, method=None, timeout=20, ctx=None):
+    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        return resp.status, resp.read()
+
+
+_NODE = {"url": INTAKE_URL, "token": os.environ.get("NODEUI_NODE_TOKEN", "")}
+
+
+def node_target():
+    """Intake-URL + Node-Token (own-honeypot-131) aus der Shipper-Config. Agent-
+    und Firewall-IPs melden unter DIESER Honeypot-Node-Identitaet, nicht einzeln."""
+    if _NODE["token"]:
+        return _NODE["url"], _NODE["token"]
+    try:
+        with open(SHIPPER_CONFIG, encoding="utf-8") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if ln.startswith("#") or "=" not in ln:
+                    continue
+                k, v = ln.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if k == "TOKEN":
+                    _NODE["token"] = v
+                elif k == "INTAKE_URL":
+                    _NODE["url"] = v.rstrip("/")
+    except OSError:
+        pass
+    return _NODE["url"], _NODE["token"]
+
+
+def forward_events(events):
+    """Gesammelte Agent-/Firewall-IPs unter der Node-Identitaet an die Intake melden."""
+    url, token = node_target()
+    if not token:
+        raise OSError("kein Node-Token (Shipper-Config fehlt)")
+    body = json.dumps({"events": events}).encode("utf-8")
+    return _http(url + "/agent/events", data=body, method="POST",
+                 headers={"Content-Type": "application/json",
+                          "Authorization": f"Bearer {token}"})
+
+
+def mint_local(host, app, kind):
+    """Lokales Sensor-Token: der Sensor gehoert zur Node, nicht zur Intake."""
+    base = (app or kind or "sensor")[:12]
+    return {"sensor_id": f"{base}-{secrets.token_hex(4)}",
+            "token": "loc_" + secrets.token_hex(16)}
+
+
+def register_firewall(name, app="unifi"):
+    """Firewall-Sensor LOKAL anlegen (kein Intake-Sensor); Token + ID zurueck."""
+    reg = mint_local(name, app, "firewall")
+    return reg["token"], reg["sensor_id"]
+
+
+def controller_probe(url, site, key, verify):
+    """System-Log des Controllers einmal antippen: prueft Erreichbarkeit + Key."""
+    ctx = None
+    if not verify:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    probe = f"{url}/proxy/network/v2/api/site/{site}/system-log/all"
+    body = json.dumps({"pageNumber": 0, "pageSize": 1}).encode("utf-8")
+    _http(probe, data=body, method="POST", ctx=ctx,
+          headers={"Content-Type": "application/json", "Accept": "application/json",
+                   "X-API-KEY": key})
+
+
+def _now():
+    return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class SensorLog:
+    """Protokoll der an dieser Node angebundenen Agents/Firewalls und ihrer
+    Meldungen. Schreibt mit, was die Node an die Intake weiterreicht. Begrenzt
+    (OOM-sicher); die Sensor-Liste wird fuer Neustarts persistiert."""
+
+    def __init__(self, path):
+        self.lock = threading.Lock()
+        self.path = path
+        self.sensors = {}                        # sensor_id -> info
+        self.by_token = {}                       # token -> sensor_id
+        self.feed = collections.deque(maxlen=500)
+        self._load()
+
+    def _load(self):
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                d = json.load(fh)
+            self.sensors = d.get("sensors", {})
+            self.by_token = d.get("by_token", {})
+        except (OSError, ValueError):
+            pass
+
+    def _save(self):
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"sensors": self.sensors, "by_token": self.by_token}, fh)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def register(self, req, resp):
+        sid = resp.get("sensor_id")
+        if not sid:
+            return
+        now = _now()
+        with self.lock:
+            s = self.sensors.get(sid) or {"sensor_id": sid, "first_ts": now, "count": 0}
+            s["kind"] = req.get("kind") or s.get("kind") or "agent"
+            s["app"] = req.get("app") or s.get("app") or ""
+            s["host"] = req.get("host") or s.get("host") or ""
+            s["last_ts"] = now
+            self.sensors[sid] = s
+            tok = resp.get("token")
+            if tok:
+                self.by_token[tok] = sid
+            if len(self.sensors) > 500:
+                old = min(self.sensors.values(), key=lambda x: x.get("last_ts", ""))
+                self.sensors.pop(old["sensor_id"], None)
+            self._save()
+
+    def events(self, token, events):
+        """Meldung protokollieren. Ein leerer events-Aufruf ist ein Lebenszeichen
+        des Readers (Lauf ohne neue Blocks): nur checked_ts wird gesetzt, damit
+        'zuletzt geprueft' sich bewegt, auch wenn nichts Neues kam."""
+        now = _now()
+        with self.lock:
+            sid = self.by_token.get(token or "")
+            s = self.sensors.get(sid) if sid else None
+            if s is not None:
+                s["checked_ts"] = now
+            if events:
+                label = (s.get("host") or s.get("app")) if s else "?"
+                kind = s.get("kind") if s else "agent"
+                for ev in events:
+                    self.feed.append({"ts": ev.get("ts") or now, "sensor": label, "kind": kind,
+                                      "src_ip": ev.get("src_ip"), "reason": ev.get("reason"),
+                                      "app": ev.get("app")})
+                if s is not None:
+                    s["last_ts"] = now
+                    s["count"] = s.get("count", 0) + len(events)
+            if s is not None or events:
+                self._save()
+
+    def remove(self, sid):
+        """Sensor manuell aus dem Protokoll loeschen: Eintrag + zugehoerige Tokens
+        raus. Die Feed-Historie bleibt (laeuft von selbst aus dem Ringpuffer)."""
+        with self.lock:
+            if sid not in self.sensors:
+                return False
+            self.sensors.pop(sid, None)
+            for tok in [t for t, s in self.by_token.items() if s == sid]:
+                self.by_token.pop(tok, None)
+            self._save()
+            return True
+
+    def view(self):
+        with self.lock:
+            sensors = sorted(self.sensors.values(),
+                             key=lambda x: x.get("checked_ts") or x.get("last_ts", ""),
+                             reverse=True)
+            return {"sensors": sensors, "feed": list(self.feed)[-200:][::-1]}
+
+
+SENSORS = SensorLog(os.path.join(FW_DIR, "sensors.json"))
+
+
+def teardown_firewall(sid):
+    """Gehoert die geloeschte Sensor-ID zu einer Firewall-/node64-Direktanbindung,
+    deren Config + Status entfernen, damit der Timer nichts mehr abfragt."""
+    pairs = (
+        (UNIFI_CONFIG, FW_STATE, os.path.join(FW_DIR, "unifi-state.json")),
+        (NODE64_CONFIG, NODE64_STATE, os.path.join(FW_DIR, "node64-state.json")),
+    )
+    removed = False
+    for conf, state, reader_state in pairs:
+        try:
+            with open(state, encoding="utf-8") as fh:
+                if json.load(fh).get("sensor_id") != sid:
+                    continue
+        except (OSError, ValueError):
+            continue
+        for fpath in (conf, state, reader_state):
+            try:
+                os.remove(fpath)
+            except OSError:
+                pass
+        removed = True
+    return removed
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "justdns-nodeui"
     protocol_version = "HTTP/1.1"
@@ -310,13 +529,348 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             self._send(200, INDEX_HTML, ctype="text/html; charset=utf-8")
             return
+        if path == "/setup":
+            self._send(200, SETUP_HTML, ctype="text/html; charset=utf-8")
+            return
+        if path == "/sensors":
+            self._send(200, SENSORS_HTML, ctype="text/html; charset=utf-8")
+            return
+        if path == "/api/sensors":
+            self._send(200, SENSORS.view())
+            return
+        if path == "/agent/install":
+            self._serve_asset("install.sh", rewrite=True,
+                              ctype="text/x-shellscript; charset=utf-8")
+            return
+        if path == "/agent/agent.py":
+            self._serve_asset("justdns-agent.py", ctype="text/x-python; charset=utf-8")
+            return
         if path == "/api/overview":
             self._send(200, STATE.poll())
+            return
+        if path == "/api/firewall/status":
+            self._send(200, self._fw_status())
+            return
+        if path == "/api/node64/status":
+            self._send(200, self._n64_status())
             return
         if path == "/healthz":
             self._send(200, {"status": "ok"})
             return
         self._send(404, {"error": "not_found"})
+
+    def do_POST(self):
+        if not self._auth_ok():
+            self._send(401, {"error": "unauthorized"})
+            return
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/agent/register":
+            self._agent_register()
+            return
+        if path == "/agent/events":
+            self._agent_events()
+            return
+        if path == "/api/firewall/connect":
+            self._fw_connect()
+            return
+        if path == "/api/node64/connect":
+            self._n64_connect()
+            return
+        if path == "/api/sensors/remove":
+            self._sensor_remove()
+            return
+        if path == "/api/sensors/sync":
+            self._sensors_sync()
+            return
+        self._send(404, {"error": "not_found"})
+
+    # -- Assets + Relay + Firewall ------------------------------------------
+
+    def _body(self):
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            n = 0
+        return self.rfile.read(n) if n > 0 else b""
+
+    def _node_base(self):
+        host = self.headers.get("Host") or f"127.0.0.1:{PORT}"
+        return "http://" + host
+
+    def _serve_asset(self, fname, rewrite=False, ctype="application/octet-stream"):
+        try:
+            with open(os.path.join(DIST, fname), encoding="utf-8") as fh:
+                txt = fh.read()
+        except OSError:
+            self._send(404, {"error": "asset_not_found", "file": fname})
+            return
+        if rewrite:
+            # Agents laden von DIESER Node und melden an DIESE Node.
+            txt = txt.replace("https://intake.justdns.justfuture.at", self._node_base())
+        self._send(200, txt, ctype=ctype)
+
+    def _agent_register(self):
+        """Agent/Firewall LOKAL registrieren: der Sensor gehoert zur Node, nicht
+        zur Intake. Node vergibt Token selbst, kein Intake-Sensor pro Agent."""
+        try:
+            d = json.loads(self._body() or b"{}")
+        except ValueError:
+            d = {}
+        reg = mint_local(d.get("host", ""), d.get("app", ""), d.get("kind", "agent"))
+        SENSORS.register(d, reg)
+        self._send(200, {"token": reg["token"], "sensor_id": reg["sensor_id"],
+                         "status": "local"})
+
+    def _agent_events(self):
+        """Meldung lokal protokollieren und die IPs unter der Node-Identitaet
+        (own-honeypot-131) an die zentrale Intake weiterleiten."""
+        body = self._body()
+        auth = self.headers.get("Authorization", "")
+        tok = auth[7:] if auth.startswith("Bearer ") else ""
+        try:
+            events = json.loads(body or b"{}").get("events", [])
+        except ValueError:
+            events = []
+        SENSORS.events(tok, events)
+        if not events:                        # Lebenszeichen: nichts weiterzuleiten
+            self._send(200, {"accepted": 0, "duplicate": 0, "heartbeat": True})
+            return
+        try:
+            status, raw = forward_events(events)
+            self._send(status, raw.decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            self._send(exc.code, exc.read().decode("utf-8", "replace"))
+        except (urllib.error.URLError, OSError) as exc:
+            self._send(502, {"error": "intake_unreachable", "detail": str(exc)[:200]})
+
+    def _fw_status(self):
+        info = {"connected": os.path.exists(UNIFI_CONFIG)}
+        try:
+            with open(FW_STATE, encoding="utf-8") as fh:
+                info.update(json.load(fh))
+        except (OSError, ValueError):
+            pass
+        return info
+
+    def _fw_connect(self):
+        try:
+            d = json.loads(self._body() or b"{}")
+        except ValueError:
+            self._send(400, {"ok": False, "message": "Ungueltige Anfrage."})
+            return
+        url = (d.get("unifi_url") or "").strip().rstrip("/")
+        site = (d.get("site") or "default").strip() or "default"
+        key = (d.get("api_key") or "").strip()
+        verify = bool(d.get("verify_tls", True))
+        if not url or not key:
+            self._send(400, {"ok": False, "message": "Controller-URL und API-Key noetig."})
+            return
+        try:
+            controller_probe(url, site, key, verify)
+        except urllib.error.HTTPError as exc:
+            auth = exc.code in (401, 403)
+            msg = "API-Key abgelehnt." if auth else f"Controller antwortet mit {exc.code}."
+            self._send(200, {"ok": False, "message": msg})
+            return
+        except (urllib.error.URLError, ssl.SSLError, OSError) as exc:
+            self._send(200, {"ok": False,
+                             "message": f"Controller nicht erreichbar: {str(exc)[:160]}"})
+            return
+        name = urllib.parse.urlparse(url).hostname or "unifi"
+        try:
+            token, sid = register_firewall(name)
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            self._send(200, {"ok": False,
+                             "message": f"Anmeldung an der Intake fehlgeschlagen: {str(exc)[:160]}"})
+            return
+        if not token:
+            self._send(200, {"ok": False, "message": "Intake lieferte kein Token."})
+            return
+        SENSORS.register({"host": name, "app": "unifi", "kind": "firewall"},
+                         {"token": token, "sensor_id": sid})
+        try:
+            detail = self._fw_install(url, site, key, verify, name, token, sid)
+        except (OSError, subprocess.SubprocessError) as exc:
+            self._send(200, {"ok": False, "message": f"Einrichtung fehlgeschlagen: {str(exc)[:200]}"})
+            return
+        msg = ("Firewall verbunden. Block-Logs werden jede Minute abgeholt und an die "
+               "Intake gemeldet.")
+        if detail:
+            msg += " " + detail
+        self._send(200, {"ok": True, "sensor_id": sid, "controller": url, "site": site,
+                         "message": msg})
+
+    def _fw_install(self, url, site, key, verify, name, token, sid):
+        """Config schreiben und den Reader einmal sofort laufen lassen. Kein root:
+        der periodische Timer (als nodeui-Benutzer) ist beim Deploy eingerichtet."""
+        state_file = os.path.join(FW_DIR, "unifi-state.json")
+        os.makedirs(FW_DIR, exist_ok=True)
+        conf = (
+            f"INTAKE_URL=http://127.0.0.1:{PORT}\n"
+            f"TOKEN={token}\n"
+            f"UNIFI_URL={url}\n"
+            f"UNIFI_API_KEY={key}\n"
+            "UNIFI_USER=\nUNIFI_PASS=\n"
+            f"UNIFI_SITE={site}\n"
+            f"VERIFY_TLS={'1' if verify else '0'}\n"
+            f"NAME={name}\n"
+            f"STATE_FILE={state_file}\n"
+            "LOOKBACK_MIN=60\n"
+        )
+        fd = os.open(UNIFI_CONFIG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(conf)
+        with open(FW_STATE, "w", encoding="utf-8") as fh:
+            json.dump({"controller": url, "site": site, "sensor_id": sid,
+                       "verify_tls": verify,
+                       "connected_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}, fh)
+        detail = ""
+        if os.path.exists(UNIFI_READER):
+            env = dict(os.environ, UNIFI_CONFIG=UNIFI_CONFIG)
+            try:
+                run = subprocess.run(["/usr/bin/python3", UNIFI_READER], env=env,
+                                     capture_output=True, text=True, timeout=90)
+                lines = [ln for ln in (run.stderr or "").splitlines() if ln.strip()]
+                if lines:
+                    detail = lines[-1].replace("[unifi] ", "")
+            except subprocess.SubprocessError as exc:
+                detail = str(exc)[:160]
+        return detail
+
+    def _n64_status(self):
+        info = {"connected": os.path.exists(NODE64_CONFIG)}
+        try:
+            with open(NODE64_STATE, encoding="utf-8") as fh:
+                info.update(json.load(fh))
+        except (OSError, ValueError):
+            pass
+        return info
+
+    def _n64_connect(self):
+        try:
+            d = json.loads(self._body() or b"{}")
+        except ValueError:
+            self._send(400, {"ok": False, "message": "Ungueltige Anfrage."})
+            return
+        url = (d.get("node64_url") or "").strip().rstrip("/")
+        key = (d.get("api_key") or "").strip()
+        verify = bool(d.get("verify_tls", True))
+        log_path = (d.get("log_path") or "").strip()
+        if not url or not key:
+            self._send(400, {"ok": False, "message": "node64-URL und API-Key noetig."})
+            return
+        name = urllib.parse.urlparse(url).hostname or "node64"
+        try:
+            token, sid = register_firewall(name, app="node64")
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            self._send(200, {"ok": False,
+                             "message": f"Anmeldung an der Intake fehlgeschlagen: {str(exc)[:160]}"})
+            return
+        if not token:
+            self._send(200, {"ok": False, "message": "Intake lieferte kein Token."})
+            return
+        SENSORS.register({"host": name, "app": "node64", "kind": "firewall"},
+                         {"token": token, "sensor_id": sid})
+        try:
+            detail = self._n64_install(url, key, verify, log_path, name, token, sid)
+        except (OSError, subprocess.SubprocessError) as exc:
+            self._send(200, {"ok": False, "message": f"Einrichtung fehlgeschlagen: {str(exc)[:200]}"})
+            return
+        # Der Reader meldet im Fehlerfall klartext (Auth/Endpunkt). Das als Status zeigen.
+        low = (detail or "").lower()
+        if "fehlgeschlagen" in low or "nicht gefunden" in low or "nicht erreichbar" in low:
+            self._send(200, {"ok": False, "message": detail or "node64 nicht erreichbar."})
+            return
+        msg = "node64 verbunden. Policy-Blocks (ohne Blocklist) gehen jede Minute in die Review-Queue."
+        if detail:
+            msg += " " + detail
+        self._send(200, {"ok": True, "sensor_id": sid, "node64": url, "message": msg})
+
+    def _n64_install(self, url, key, verify, log_path, name, token, sid):
+        """Config schreiben und den Reader einmal sofort laufen lassen (kein root)."""
+        state_file = os.path.join(FW_DIR, "node64-state.json")
+        os.makedirs(FW_DIR, exist_ok=True)
+        conf = (
+            f"INTAKE_URL=http://127.0.0.1:{PORT}\n"
+            f"TOKEN={token}\n"
+            f"NODE64_URL={url}\n"
+            f"NODE64_API_KEY={key}\n"
+            f"NODE64_LOG_PATH={log_path}\n"
+            f"VERIFY_TLS={'1' if verify else '0'}\n"
+            f"NAME={name}\n"
+            f"STATE_FILE={state_file}\n"
+            "PAGES=20\n"
+        )
+        fd = os.open(NODE64_CONFIG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(conf)
+        with open(NODE64_STATE, "w", encoding="utf-8") as fh:
+            json.dump({"node64": url, "sensor_id": sid, "verify_tls": verify,
+                       "connected_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}, fh)
+        detail = ""
+        if os.path.exists(NODE64_READER):
+            env = dict(os.environ, NODE64_CONFIG=NODE64_CONFIG)
+            try:
+                run = subprocess.run(["/usr/bin/python3", NODE64_READER], env=env,
+                                     capture_output=True, text=True, timeout=90)
+                lines = [ln for ln in (run.stderr or "").splitlines() if ln.strip()]
+                if lines:
+                    detail = lines[-1].replace("[node64] ", "")
+            except subprocess.SubprocessError as exc:
+                detail = str(exc)[:160]
+        return detail
+
+    def _sensor_remove(self):
+        """Sensor aus dem Protokoll loeschen. Bei einer Firewall-/node64-Direkt-
+        anbindung zusaetzlich deren Config + Status abschalten."""
+        try:
+            d = json.loads(self._body() or b"{}")
+        except ValueError:
+            self._send(400, {"ok": False, "message": "Ungueltige Anfrage."})
+            return
+        sid = (d.get("sensor_id") or "").strip()
+        if not sid:
+            self._send(400, {"ok": False, "message": "Sensor-ID fehlt."})
+            return
+        ok = SENSORS.remove(sid)
+        fw = teardown_firewall(sid)
+        if not ok and not fw:
+            self._send(404, {"ok": False, "message": "Sensor nicht gefunden."})
+            return
+        msg = "Sensor entfernt."
+        if fw:
+            msg += " Direktanbindung abgeschaltet, der Timer fragt nichts mehr ab."
+        self._send(200, {"ok": True, "message": msg})
+
+    def _run_reader(self, reader, env_key, conf_path, tag):
+        """Einen Direktanbindungs-Reader sofort laufen lassen (wie der Timer, aber
+        auf Knopfdruck). None, wenn die Anbindung nicht aktiv ist."""
+        if not os.path.exists(conf_path) or not os.path.exists(reader):
+            return None
+        env = dict(os.environ, **{env_key: conf_path})
+        try:
+            run = subprocess.run(["/usr/bin/python3", reader], env=env,
+                                 capture_output=True, text=True, timeout=90)
+            lines = [ln for ln in (run.stderr or "").splitlines() if ln.strip()]
+            return lines[-1].replace(f"[{tag}] ", "") if lines else "ok"
+        except subprocess.SubprocessError as exc:
+            return str(exc)[:160]
+
+    def _sensors_sync(self):
+        """Jetzt syncen: die aktiven Direktanbindungen (UniFi + node64) sofort
+        abfragen, statt auf den Minuten-Timer zu warten. Agents auf fremden Hosts
+        laufen ueber ihren eigenen Timer und sind hier nicht erreichbar."""
+        results = []
+        d1 = self._run_reader(UNIFI_READER, "UNIFI_CONFIG", UNIFI_CONFIG, "unifi")
+        if d1 is not None:
+            results.append({"name": "Firewall (UniFi)", "detail": d1})
+        d2 = self._run_reader(NODE64_READER, "NODE64_CONFIG", NODE64_CONFIG, "node64")
+        if d2 is not None:
+            results.append({"name": "node64", "detail": d2})
+        if not results:
+            self._send(200, {"ok": False, "message": "Keine Direktanbindung aktiv."})
+            return
+        self._send(200, {"ok": True, "results": results})
 
 
 INDEX_HTML = """<!doctype html>
@@ -348,6 +902,8 @@ a,button{color:inherit}
 .brand b{font-size:15px;letter-spacing:-.01em}.brand span{color:var(--dim);font:12px/1.2 var(--mono);display:block}
 .status{color:var(--dim);font:12px/1.5 var(--mono);flex:0 0 auto;padding-left:16px;border-left:1px solid var(--line)}
 .status b{color:var(--green);font-weight:500}
+.navlink{flex:0 0 auto;color:var(--blue);font:12px/1 var(--mono);text-decoration:none;padding:7px 11px;border:1px solid var(--line2);border-radius:8px;background:var(--panel)}
+.navlink:hover{border-color:var(--blue)}
 /* main */
 main{flex:1;display:flex;flex-direction:column;min-width:0;overflow:hidden}
 .top{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#0e141c,#0a0d12)}
@@ -412,6 +968,8 @@ td.cmd .bb{color:var(--amber)}td.cmd .dl{color:var(--red)}
   <div class="top">
     <div class="brand"><span class="dot"></span><div><b>JustDNS</b><span>honeypot&nbsp;node</span></div></div>
     <div class="status">srv-web-01 &middot; egress&nbsp;<b>locked</b> &middot; live&nbsp;3s</div>
+    <a class="navlink" href="/sensors">Sensoren</a>
+    <a class="navlink" href="/setup">+ Sensor anbinden</a>
     <div class="kpi">
       <div class="k red"><div class="n tnum" id="kp-shell">0</div><div class="l">in Shell</div></div>
       <div class="k amber"><div class="n tnum" id="kp-ev">0</div><div class="l">Logins</div></div>
@@ -539,7 +1097,354 @@ setInterval(tick, 3000);
 </body></html>"""
 
 
+SETUP_HTML = """<!doctype html>
+<html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JustDNS Node - Sensoren anbinden</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0a0d12;--panel:#10151d;--line:#1e2733;--line2:#2a3542;--ink:#dfe6ef;--mut:#8695a8;--dim:#7e8ca0;
+--blue:#6cc7ff;--green:#5fdd97;--amber:#f5b445;--mono:"IBM Plex Mono",ui-monospace,monospace;--sans:"IBM Plex Sans",system-ui,sans-serif;color-scheme:dark;}
+*{box-sizing:border-box}html,body{margin:0}body{background:var(--bg);color:var(--ink);font:14px/1.5 var(--sans);min-height:100vh}
+a{color:var(--blue)}
+.wrap{max-width:860px;margin:0 auto;padding:22px 16px 64px}
+.top{display:flex;align-items:center;gap:12px;padding:4px 0 18px;border-bottom:1px solid var(--line);margin-bottom:22px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px #102418}
+.top b{font-size:15px}.top span{color:var(--dim);font:12px/1 var(--mono)}
+.back{margin-left:auto;color:var(--blue);font:12px/1 var(--mono);text-decoration:none;padding:7px 11px;border:1px solid var(--line2);border-radius:8px}
+.back:hover{border-color:var(--blue)}
+.lead{color:var(--mut);margin:0 0 22px;max-width:62ch}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:18px}
+.card h2{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin:0 0 4px}
+.card p.d{color:var(--dim);margin:0 0 14px;font-size:13px}
+.row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.f{flex:1;min-width:150px}.f.sm{flex:0 0 120px}
+label{display:block;font-size:12px;color:var(--mut);margin-bottom:4px}
+input,select{width:100%;font:inherit;background:#0d1117;color:var(--ink);border:1px solid var(--line2);border-radius:8px;padding:8px 10px}
+input:focus,select:focus{outline:2px solid var(--blue);outline-offset:1px}
+.chk{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--mut);margin:2px 0 12px}.chk input{width:auto}
+.cmd{display:flex;gap:10px;align-items:flex-start;background:#070a0e;border:1px solid var(--line2);border-radius:9px;padding:11px 12px}
+.cmd code{font-family:var(--mono);font-size:13px;color:#e7edf4;white-space:pre-wrap;word-break:break-all;flex:1}
+.cmd .dl{color:var(--amber)}
+.copy{flex:0 0 auto;font:500 12px/1 var(--mono);color:var(--bg);background:var(--blue);border:0;border-radius:7px;padding:8px 12px;cursor:pointer}
+.copy.ok{background:var(--green)}
+.note{color:var(--dim);font-size:12px;margin:10px 0 0}
+.note b{color:var(--amber);font-weight:500}
+.btn{font:600 13px/1 var(--sans);color:var(--bg);background:var(--blue);border:0;border-radius:8px;padding:10px 16px;cursor:pointer}
+.btn:disabled{opacity:.55;cursor:default}
+.btn:hover:not(:disabled){filter:brightness(1.08)}
+.result{margin-top:12px;padding:10px 12px;border-radius:8px;font-size:13px;display:none}
+.result.show{display:block}
+.result.ok{background:#102418;border:1px solid #1e4d33;color:var(--green)}
+.result.err{background:#2a1217;border:1px solid #4d1e24;color:var(--red)}
+.result.wait{background:#11202a;border:1px solid #1e3a4d;color:var(--blue)}
+</style></head>
+<body><div class="wrap">
+  <div class="top"><span class="dot"></span><div><b>JustDNS</b> <span>honeypot node</span></div>
+    <a class="back" href="/">&larr; Konsole</a></div>
+  <p class="lead">Sensoren an diese Node anbinden. Agent und Firewall melden an <b>diese
+  Node</b>; sie sammelt und leitet an die zentrale Intake weiter, wo IPs manuell fuer die
+  Blockliste freigegeben werden. Private IPs werden nie veroeffentlicht.</p>
+
+  <div class="card">
+    <h2>Agent ausrollen</h2>
+    <p class="d">Liest App-Ablehnungen (nginx, Caddy, Node64, NPM, Apache, HAProxy, sshd,
+    fail2ban) und meldet die Quell-IPs an diese Node. Befehl auf dem Ziel-Host als root
+    ausfuehren.</p>
+    <div class="row">
+      <div class="f"><label>Host-Name (LXC / VM)</label><input id="ag_name" placeholder="web-02" oninput="buildAgent()"></div>
+      <div class="f sm"><label>Anwendung</label><select id="ag_app" onchange="buildAgent()">
+        <option>nginx</option><option>apache</option><option>caddy</option>
+        <option>npm</option><option>haproxy</option><option>sshd</option><option>fail2ban</option></select></div>
+    </div>
+    <div class="cmd"><code id="ag_cmd"></code><button class="copy" onclick="cp('ag_cmd',this)">Kopieren</button></div>
+  </div>
+
+  <div class="card">
+    <h2>Firewall anbinden (Unifi, nur lesen)</h2>
+    <p class="d">Diese Node fragt den Unifi-Controller direkt ab und holt <b>alle</b> geblockten
+    externen Zugriffe (ext&rarr;intern / ext&rarr;Gateway), nicht nur IPS/IDS. Nur lesend, keine
+    Aenderung am Controller.</p>
+    <div class="row">
+      <div class="f"><label>Controller-URL</label><input id="fw_url" placeholder="https://192.168.1.1"></div>
+      <div class="f sm"><label>Site</label><input id="fw_site" value="default"></div>
+    </div>
+    <div class="row">
+      <div class="f"><label>Read-only API-Key</label><input id="fw_key" type="password" autocomplete="off" placeholder="X-API-KEY"></div>
+    </div>
+    <label class="chk"><input type="checkbox" id="fw_tls" checked> Selbstsigniertes Controller-Zertifikat (TLS-Pruefung aus)</label>
+    <button class="btn" id="fw_btn" onclick="connectFw()">Firewall verbinden</button>
+    <div class="result" id="fw_res"></div>
+    <p class="note">Den read-only API-Key bekommst du im Controller unter <b>Settings &rarr;
+    Control Plane &rarr; Integrations</b> (am besten unter einem Viewer-Admin). Der Key bleibt
+    auf dieser Node und wird nicht an die Intake gesendet.</p>
+  </div>
+
+  <div class="card">
+    <h2>node64 anbinden (PROXY64, nur lesen)</h2>
+    <p class="d">Diese Node liest das node64-Zugriffslog und holt die <b>eigenen</b> Policy-Blocks
+    (Exploit-/WAF-Treffer, Access-List, Rate-Limit, honeypot_instant_block). Blocklist-Treffer
+    werden bewusst ausgelassen (die stehen schon auf der Liste). Nur lesend.</p>
+    <div class="row">
+      <div class="f"><label>node64-URL</label><input id="n6_url" placeholder="https://node64.lan"></div>
+    </div>
+    <div class="row">
+      <div class="f"><label>API-Key (node64_...)</label><input id="n6_key" type="password" autocomplete="off" placeholder="node64_..."></div>
+    </div>
+    <label class="chk"><input type="checkbox" id="n6_tls" checked> Selbstsigniertes Zertifikat (TLS-Pruefung aus)</label>
+    <button class="btn" id="n6_btn" onclick="connectN6()">node64 verbinden</button>
+    <div class="result" id="n6_res"></div>
+    <p class="note">Den API-Key bekommst du in node64 unter <b>Einstellungen &rarr; API-Keys</b>
+    (Prefix <code>node64_</code>, nur lesen reicht). Der Key bleibt auf dieser Node.</p>
+  </div>
+</div>
+<script>
+const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const dl = '<span class="dl">curl</span>';
+const $ = id => document.getElementById(id);
+function buildAgent(){
+  const name = ($('ag_name').value || 'mein-host').trim();
+  const app = $('ag_app').value;
+  const c = `curl -fsSL ${location.origin}/agent/install | sudo bash -s -- --name ${esc(name)} --app ${esc(app)}`;
+  $('ag_cmd').innerHTML = c.replace('curl', dl);
+}
+function cp(id,btn){
+  navigator.clipboard.writeText($(id).textContent).then(()=>{ btn.textContent='Kopiert'; btn.classList.add('ok');
+    setTimeout(()=>{btn.textContent='Kopieren';btn.classList.remove('ok');},1400); });
+}
+function res(cls,msg){ const r=$('fw_res'); r.className='result show '+cls; r.innerHTML=msg; }
+async function connectFw(){
+  const url=($('fw_url').value||'').trim();
+  const site=($('fw_site').value||'default').trim();
+  const key=($('fw_key').value||'').trim();
+  const verify=!$('fw_tls').checked;
+  if(!url||!key){ res('err','Controller-URL und API-Key noetig.'); return; }
+  const btn=$('fw_btn'); btn.disabled=true; btn.textContent='Verbinde...';
+  res('wait','Controller wird getestet und die Firewall angemeldet...');
+  try{
+    const r=await fetch('/api/firewall/connect',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({unifi_url:url,site:site,api_key:key,verify_tls:verify})});
+    const d=await r.json();
+    if(d.ok){ res('ok','&#10003; '+esc(d.message)); $('fw_key').value=''; }
+    else res('err','&#10007; '+esc(d.message||'Fehlgeschlagen.'));
+  }catch(e){ res('err','Netzwerkfehler: '+esc(String(e))); }
+  btn.disabled=false; btn.textContent='Firewall verbinden';
+}
+function res6(cls,msg){ const r=$('n6_res'); r.className='result show '+cls; r.innerHTML=msg; }
+async function connectN6(){
+  const url=($('n6_url').value||'').trim();
+  const key=($('n6_key').value||'').trim();
+  const verify=!$('n6_tls').checked;
+  if(!url||!key){ res6('err','node64-URL und API-Key noetig.'); return; }
+  const btn=$('n6_btn'); btn.disabled=true; btn.textContent='Verbinde...';
+  res6('wait','node64 wird getestet und angemeldet...');
+  try{
+    const r=await fetch('/api/node64/connect',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({node64_url:url,api_key:key,verify_tls:verify})});
+    const d=await r.json();
+    if(d.ok){ res6('ok','&#10003; '+esc(d.message)); $('n6_key').value=''; }
+    else res6('err','&#10007; '+esc(d.message||'Fehlgeschlagen.'));
+  }catch(e){ res6('err','Netzwerkfehler: '+esc(String(e))); }
+  btn.disabled=false; btn.textContent='node64 verbinden';
+}
+buildAgent();
+</script>
+</body></html>"""
+
+
+SENSORS_HTML = """<!doctype html>
+<html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JustDNS Node - Sensor-Protokoll</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0a0d12;--panel:#10151d;--line:#1e2733;--line2:#2a3542;--ink:#dfe6ef;--mut:#8695a8;--dim:#7e8ca0;
+--blue:#6cc7ff;--green:#5fdd97;--amber:#f5b445;--red:#ff5d6c;--mono:"IBM Plex Mono",ui-monospace,monospace;--sans:"IBM Plex Sans",system-ui,sans-serif;color-scheme:dark;}
+*{box-sizing:border-box}html,body{margin:0}body{background:var(--bg);color:var(--ink);font:14px/1.5 var(--sans);min-height:100vh}
+a{color:var(--blue);text-decoration:none}
+.wrap{max-width:1040px;margin:0 auto;padding:22px 16px 64px}
+.top{display:flex;align-items:center;gap:12px;padding:4px 0 18px;border-bottom:1px solid var(--line);margin-bottom:22px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px #102418}
+.top b{font-size:15px}.top .sub{color:var(--dim);font:12px/1 var(--mono)}
+.nav{margin-left:auto;display:flex;gap:8px}
+.nav a{font:12px/1 var(--mono);padding:7px 11px;border:1px solid var(--line2);border-radius:8px}
+.nav a:hover{border-color:var(--blue)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin-bottom:18px;overflow:hidden}
+.ch{display:flex;align-items:center;gap:8px;padding:11px 15px;border-bottom:1px solid var(--line)}
+.ch h2{font-size:12px;letter-spacing:.07em;text-transform:uppercase;color:var(--mut);margin:0;font-weight:600}
+.ch .live{margin-left:auto;color:var(--green);font:12px/1 var(--mono)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+thead th{position:sticky;top:0;background:#0f1620;color:var(--dim);text-align:left;font-weight:600;font-size:12px;letter-spacing:.05em;text-transform:uppercase;padding:8px 15px;border-bottom:1px solid var(--line)}
+tbody td{padding:8px 15px;border-bottom:1px solid #161e28;white-space:nowrap}
+tbody tr:hover td{background:#121a24}
+.scroll{max-height:46vh;overflow:auto}
+.ip{color:var(--blue);font-family:var(--mono)}
+.mono{font-family:var(--mono)}.muted{color:var(--dim)}
+.k{display:inline-block;padding:1px 8px;border-radius:999px;font:500 12px/1.6 var(--mono)}
+.k.agent{background:#10263a;color:#7fc5ff}.k.firewall{background:#2a2111;color:var(--amber)}
+.r{display:inline-block;padding:1px 8px;border-radius:999px;font:500 12px/1.6 var(--mono);background:#1d2530;color:var(--mut)}
+.r.ips_alert{background:#2a1217;color:var(--red)}.r.fw_drop{background:#2a2111;color:var(--amber)}
+.empty{padding:22px 15px;color:var(--dim);font-size:13px}
+td.act{text-align:right;padding-right:15px}
+.del{font:500 12px/1 var(--mono);color:var(--mut);background:transparent;border:1px solid var(--line2);border-radius:7px;padding:5px 10px;cursor:pointer}
+.del:hover{border-color:var(--red);color:var(--red)}
+.del:disabled{opacity:.5;cursor:default}
+.sync{font:500 12px/1 var(--mono);color:var(--blue);background:transparent;border:1px solid var(--line2);border-radius:7px;padding:5px 11px;cursor:pointer}
+.sync:hover{border-color:var(--blue)}
+.sync:disabled{opacity:.5;cursor:default}
+.syncmsg{font:12px/1 var(--mono);color:var(--dim)}
+</style></head>
+<body><div class="wrap">
+  <div class="top"><span class="dot"></span><div><b>JustDNS</b> <span class="sub">honeypot node</span></div>
+    <div class="nav"><a href="/">&larr; Konsole</a><a href="/setup">+ Sensor anbinden</a></div></div>
+
+  <div class="card">
+    <div class="ch"><h2>Angebundene Sensoren</h2><span class="live" id="sc"></span>
+      <span class="syncmsg" id="syncmsg"></span>
+      <button class="sync" id="syncbtn">Jetzt syncen</button></div>
+    <div class="scroll"><table>
+      <thead><tr><th>Typ</th><th>Host / Quelle</th><th>App</th><th>Sensor-ID</th><th>Meldungen</th><th>Zuletzt geprueft (Wien)</th><th></th></tr></thead>
+      <tbody id="sensors"></tbody></table></div>
+  </div>
+
+  <div class="card">
+    <div class="ch"><h2>Gemeldete Zugriffe</h2><span class="live"><span id="fc"></span> &middot; live</span></div>
+    <div class="scroll"><table>
+      <thead><tr><th>Zeit (Wien)</th><th>Sensor</th><th>Typ</th><th>Quell-IP</th><th>Grund</th></tr></thead>
+      <tbody id="feed"></tbody></table></div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const VIENNA = new Intl.DateTimeFormat('de-AT',{timeZone:'Europe/Vienna',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+function ts(t){ if(!t)return ''; let s=String(t).trim(); if(/^\\d{4}-\\d{2}-\\d{2} /.test(s))s=s.replace(' ','T'); if(!/[Zz]|[+\\-]\\d{2}:?\\d{2}$/.test(s))s+='Z'; const d=new Date(s); return isNaN(d)?String(t):VIENNA.format(d).replace(',',''); }
+async function tick(){
+  let d; try{ d=await (await fetch('/api/sensors')).json(); }catch(e){ return; }
+  const sens=d.sensors||[];
+  $('sc').textContent = sens.length ? (sens.length+' Sensor'+(sens.length===1?'':'en')) : '';
+  let h='';
+  for(const s of sens){
+    const kind=(s.kind==='firewall')?'firewall':'agent';
+    const kl=(s.kind==='firewall')?'Firewall':'Agent';
+    h+=`<tr><td><span class="k ${kind}">${kl}</span></td>`
+      +`<td class="mono">${esc(s.host)||'<span class="muted">-</span>'}</td>`
+      +`<td class="mono">${esc(s.app)||'<span class="muted">-</span>'}</td>`
+      +`<td class="mono muted">${esc(s.sensor_id)}</td>`
+      +`<td class="mono">${s.count||0}</td>`
+      +`<td class="mono muted">${esc(ts(s.checked_ts||s.last_ts))}</td>`
+      +`<td class="act"><button class="del" data-sid="${esc(s.sensor_id)}" data-host="${esc(s.host||s.app||s.sensor_id)}">Entfernen</button></td></tr>`;
+  }
+  $('sensors').innerHTML = h || '<tr><td colspan="7" class="empty">Noch keine Sensoren angebunden. Unter &bdquo;+ Sensor anbinden&ldquo; einen Agent ausrollen oder die Firewall verbinden.</td></tr>';
+  const feed=d.feed||[];
+  $('fc').textContent = feed.length ? (feed.length+' Meldungen') : '';
+  let f='';
+  for(const r of feed){
+    const rl=esc(r.reason||'');
+    f+=`<tr><td class="mono muted">${esc(ts(r.ts))}</td>`
+      +`<td class="mono">${esc(r.sensor)||'?'}</td>`
+      +`<td><span class="k ${r.kind==='firewall'?'firewall':'agent'}">${r.kind==='firewall'?'Firewall':'Agent'}</span></td>`
+      +`<td class="ip">${esc(r.src_ip)}</td>`
+      +`<td><span class="r ${rl}">${rl||'-'}</span></td></tr>`;
+  }
+  $('feed').innerHTML = f || '<tr><td colspan="5" class="empty">Noch keine gemeldeten Zugriffe.</td></tr>';
+}
+let busy=false;
+$('sensors').addEventListener('click', async e=>{
+  const b=e.target.closest('.del'); if(!b||busy) return;
+  const sid=b.dataset.sid, host=b.dataset.host||sid;
+  if(!confirm('Sensor „'+host+'“ entfernen? Eine verbundene Firewall-/node64-Direktanbindung wird dabei abgeschaltet.')) return;
+  busy=true; b.disabled=true; b.textContent='…';
+  try{
+    const r=await fetch('/api/sensors/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sensor_id:sid})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||!j.ok){ alert(j.message||'Entfernen fehlgeschlagen.'); b.disabled=false; b.textContent='Entfernen'; }
+  }catch(err){ alert('Entfernen fehlgeschlagen: '+err); b.disabled=false; b.textContent='Entfernen'; }
+  busy=false; tick();
+});
+$('syncbtn').addEventListener('click', async ()=>{
+  const b=$('syncbtn'), m=$('syncmsg'); b.disabled=true; const o=b.textContent; b.textContent='Sync läuft…'; m.textContent='';
+  try{
+    const r=await fetch('/api/sensors/sync',{method:'POST'});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||!j.ok){ m.textContent=j.message||'Sync fehlgeschlagen.'; }
+    else { m.textContent=(j.results||[]).map(x=>esc(x.name)+': '+esc(x.detail)).join('  ·  ')||'ok'; }
+  }catch(e){ m.textContent='Sync fehlgeschlagen'; }
+  b.disabled=false; b.textContent=o; tick();
+});
+tick(); setInterval(tick,3000);
+</script>
+</body></html>"""
+
+
+def reconcile_firewall():
+    """Eine schon eingerichtete Firewall-Anbindung ins Protokoll uebernehmen,
+    damit sie auch nach einem Neustart oder nach einem Update sichtbar ist."""
+    try:
+        with open(UNIFI_CONFIG, encoding="utf-8") as fh:
+            conf = {}
+            for ln in fh:
+                ln = ln.strip()
+                if ln and not ln.startswith("#") and "=" in ln:
+                    k, v = ln.split("=", 1)
+                    conf[k.strip()] = v.strip()
+    except OSError:
+        return
+    token = conf.get("TOKEN", "")
+    try:
+        with open(FW_STATE, encoding="utf-8") as fh:
+            st = json.load(fh)
+    except (OSError, ValueError):
+        st = {}
+    sid = st.get("sensor_id")
+    if not token or not sid:
+        return
+    name = conf.get("NAME") or st.get("controller") or "unifi"
+    SENSORS.register({"host": name, "app": "unifi", "kind": "firewall"},
+                     {"token": token, "sensor_id": sid})
+    try:
+        with open(os.path.join(FW_DIR, "unifi-state.json"), encoding="utf-8") as fh:
+            cnt = len(json.load(fh).get("seen_ids", []))
+    except (OSError, ValueError):
+        cnt = 0
+    with SENSORS.lock:
+        s = SENSORS.sensors.get(sid)
+        if s and not s.get("count"):
+            s["count"] = cnt
+            SENSORS._save()
+
+
+def reconcile_node64():
+    """Eine schon eingerichtete node64-Anbindung ins Protokoll uebernehmen."""
+    try:
+        with open(NODE64_CONFIG, encoding="utf-8") as fh:
+            conf = {}
+            for ln in fh:
+                ln = ln.strip()
+                if ln and not ln.startswith("#") and "=" in ln:
+                    k, v = ln.split("=", 1)
+                    conf[k.strip()] = v.strip()
+    except OSError:
+        return
+    token = conf.get("TOKEN", "")
+    try:
+        with open(NODE64_STATE, encoding="utf-8") as fh:
+            st = json.load(fh)
+    except (OSError, ValueError):
+        st = {}
+    sid = st.get("sensor_id")
+    if not token or not sid:
+        return
+    name = conf.get("NAME") or st.get("node64") or "node64"
+    SENSORS.register({"host": name, "app": "node64", "kind": "firewall"},
+                     {"token": token, "sensor_id": sid})
+
+
 def main():
+    reconcile_firewall()
+    reconcile_node64()
     httpd = ThreadingHTTPServer((BIND, PORT), Handler)
     print(f"[nodeui] lauscht auf {BIND}:{PORT}", flush=True)
     try:

@@ -1,0 +1,25 @@
+# JustDNS Fleet-Agent - Konfiguration (/etc/justdns-agent.conf, 0640 root:root).
+# Der Install-Befehl aus der UI schreibt diese Datei fertig. Felder einzeln:
+
+# Intake-Endpunkt (hinter PROXY64/WAN).
+INTAKE_URL=https://intake.justdns.justfuture.at
+
+# Submission-Token. Wird in der UI unter "Agent hinzufuegen" erzeugt (write-only,
+# pro Agent revozierbar). Pflicht.
+TOKEN=
+
+# App-Profil. Eines von: nginx caddy npm apache haproxy sshd fail2ban
+# (node64 wird NICHT getailt - es hat die eigene Direktanbindung im nodeui.)
+APP=nginx
+
+# LXC/VM-Name fuers Dashboard (optional, Anzeige).
+HOST=
+
+# Logpfad(e), Glob. Leer -> App-Default (siehe justdns-agent.py).
+LOG_GLOB=
+
+# HTTP-Status, die als Ablehnung zaehlen (nur HTTP-Profile).
+REJECT_STATUS=401,403,404,405,429,444
+
+STATE_FILE=/var/lib/justdns-agent/state.json
+BATCH=500

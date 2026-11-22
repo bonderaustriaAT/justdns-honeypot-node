@@ -205,6 +205,22 @@ nehmen. Die Web-Personas stehen in
 in `.env`, gewuerfelt von `randomize-node.sh`. Hinweise zum Betrieb von
 OpenCanary ohne Docker stehen in [opencanary/README.md](opencanary/README.md).
 
+## Optional: Fleet-Agent und Firewall-Reader
+
+Zwei optionale Zusaetze melden wie der Shipper, aber aus anderen Quellen als den
+Koedern:
+
+- **Fleet-Agent** ([`agent/`](agent/README.md)) laeuft auf eigenen LXCs/VMs, tailt
+  die Logs einer echten App (nginx, Caddy, Node64, NPM, Apache, HAProxy, sshd,
+  fail2ban) und meldet die IPs hinter abgelehnten oder blockierten Zugriffen.
+- **Firewall-Reader** ([`firewall/`](firewall/README.md)) liest IPS/IDS-Alarme und
+  Firewall-Drops von einem Unifi-Controller (nur lesen).
+
+Beide sind aus, solange du sie nicht installierst, registrieren sich selbst und
+brauchen eine Freigabe im Intake-Dashboard, und veroeffentlichen nie automatisch
+eine IP: die Intake bildet Kandidaten, der Betreiber gibt sie frei, private IPs
+werden nie veroeffentlicht.
+
 ## Sicherheit
 
 Alles hier ist ein Koeder. Es gibt keine echte Luecke zum Oeffnen, weil hinter
