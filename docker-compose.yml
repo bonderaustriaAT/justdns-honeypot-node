@@ -134,17 +134,22 @@ services:
       - cowrie
     environment:
       NODEUI_BIND: 0.0.0.0
+      # Optionaler Legacy-Bearer nur fuer API-Reads; die UI nutzt jetzt Login-Sessions.
       NODEUI_TOKEN: ${NODEUI_TOKEN:-}
+      # Eigenstaendiger Auth-Store dieser Node (First-Boot-Admin unter /setup):
+      NODEUI_AUTH_DB: /var/lib/justdns-nodeui/auth.db
       COWRIE_LOG: /logs/cowrie/cowrie.json*
       OC_LOG: /logs/opencanary/opencanary.log*
       WEBDECOY_LOG: /logs/webdecoy/webdecoy.log*
     volumes:
       - ./nodeui/nodeui.py:/app/nodeui.py:ro
+      - ./nodeui/nodeauth.py:/app/nodeauth.py:ro
+      - nodeui-auth:/var/lib/justdns-nodeui
       - cowrie-logs:/logs/cowrie:ro
       - opencanary-logs:/logs/opencanary:ro
       - webdecoy-logs:/logs/webdecoy:ro
     ports:
-      - "${NODEUI_PORT:-8090}:8080"
+      - "${NODEUI_PORT:-8090}:8090"
     command: ["python", "/app/nodeui.py"]
 
 volumes:
@@ -152,3 +157,4 @@ volumes:
   opencanary-logs:
   webdecoy-logs:
   shipper-state:
+  nodeui-auth:
