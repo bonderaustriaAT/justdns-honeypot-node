@@ -35,9 +35,12 @@ class RawRestShape(unittest.TestCase):
         self.assertEqual(ev["reason"], "waf_block")
         self.assertEqual(ev["path"], "/.git/config")
 
-    def test_raw_blocklist_dropped(self):
-        self.assertIsNone(nr.row_to_event(
-            {"id": 1, "client": "1.2.3.4", "reason": "blocklist", "status": 0}))
+    def test_raw_blocklist_reported(self):
+        rid, ev = nr.row_to_event(
+            {"id": 1, "client": "1.2.3.4", "reason": "blocklist", "status": 0})
+        self.assertEqual(rid, 1)
+        self.assertEqual(ev["reason"], "blocklist_hit")
+        self.assertEqual(ev["src_ip"], "1.2.3.4")
 
 
 class Mapping(unittest.TestCase):
@@ -63,8 +66,10 @@ class Mapping(unittest.TestCase):
         _, ev = nr.row_to_event(row(11, "1.2.3.4", "honeypot", 403, "/trap"))
         self.assertEqual(ev["reason"], "waf_block")
 
-    def test_blocklist_is_dropped_no_circularity(self):
-        self.assertIsNone(nr.row_to_event(row(2970, "45.198.224.32", "blocklist", 0)))
+    def test_blocklist_is_reported(self):
+        _, ev = nr.row_to_event(row(2970, "45.198.224.32", "blocklist", 0))
+        self.assertEqual(ev["reason"], "blocklist_hit")
+        self.assertEqual(ev["src_ip"], "45.198.224.32")
 
     def test_unknown_reason_dropped(self):
         self.assertIsNone(nr.row_to_event(row(1, "1.2.3.4", "geo", 403)))

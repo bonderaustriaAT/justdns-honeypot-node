@@ -6,15 +6,15 @@ Requests, extrahiert die Quell-IP und meldet sie als Sensor (kind='firewall')
 an die Node (POST /agent/events). Die Node leitet unter ihrer Identitaet an die
 Intake weiter; private Quell-IPs werden dort markiert und nie veroeffentlicht.
 
-WICHTIG - keine Zirkularitaet: rejected_reason='blocklist' wird NICHT gemeldet.
-Das sind Treffer gegen unsere eigene (und fremde) Blockliste - sie zurueck in die
-Liste zu geben braechte nichts. Gemeldet werden nur die EIGENEN Policy-Blocks von
-node64, die neue Intel liefern:
-  exploit     -> waf_block   (WAF: Exploit-/Sensibler-Pfad-Versuch)   high
-  honeypot    -> waf_block   (honeypot_instant_block hat die IP gebannt) high
-  acl         -> http_403    (Access-List-Deny; Pfad/Volumen entscheidet im Review)
-  rate_limit  -> http_429    (Rate-Ban; Volumen entscheidet)
+Gemeldet werden alle abgewiesenen Requests, auch die gegen eine Blockliste:
+  exploit     -> waf_block     (WAF: Exploit-/Sensibler-Pfad-Versuch)     high
+  honeypot    -> waf_block     (honeypot_instant_block hat die IP gebannt) high
+  acl         -> http_403      (Access-List-Deny; Pfad/Volumen im Review)
+  rate_limit  -> http_429      (Rate-Ban; Volumen entscheidet)
+  blocklist   -> blocklist_hit (von einer Liste abgewiesen; externe Bestaetigung)
 Nichts wird automatisch gelistet - alles landet als Kandidat in der Review-Queue.
+Schon gelistete IPs fallen dort ueber die Dedupe wieder raus, es gibt also keine
+Zirkularitaet; neu sind nur IPs, die eine fremde Liste kennt und unsere noch nicht.
 
 Auth: node64-API-Key (Settings > API keys, Prefix node64_) als Bearer-Token. Der
 MCP-Key (mcp64_) wird von /api NICHT akzeptiert. Dedupe ueber die Log-Zeilen-id.
@@ -61,12 +61,14 @@ LOG_PATH_CANDIDATES = (
     "/api/proxy/access-log",
 )
 
-# node64-Grund -> (Agent-reason, status_code-Fallback). blocklist fehlt bewusst.
+# node64-Grund -> Agent-reason. blocklist kommt als eigener Grund mit (externe
+# Bestaetigung); schon gelistete IPs deduped die Intake ohnehin wieder weg.
 REASON_MAP = {
     "exploit": "waf_block",
     "honeypot": "waf_block",
     "acl": "http_403",
     "rate_limit": "http_429",
+    "blocklist": "blocklist_hit",
 }
 
 
@@ -219,12 +221,12 @@ class Node64:
 
 
 def row_to_event(row):
-    """node64-Logzeile -> (id, event-dict) oder None. blocklist wird verworfen
-    (Zirkularitaet). src_ip = client. Feldnamen je nach Quelle: rohe REST-API hat
-    reason/path oben, ueber das MCP liegen sie als rejected_reason/untrusted.path vor."""
+    """node64-Logzeile -> (id, event-dict) oder None. src_ip = client. Feldnamen je
+    nach Quelle: rohe REST-API hat reason/path oben, ueber das MCP liegen sie als
+    rejected_reason/untrusted.path vor."""
     reason_raw = row.get("reason") or row.get("rejected_reason") or ""
     mapped = REASON_MAP.get(reason_raw)
-    if mapped is None:                      # blocklist oder unbekannt -> raus
+    if mapped is None:                      # unbekannter Grund -> raus
         return None
     ip = row.get("client")
     rid = row.get("id")
