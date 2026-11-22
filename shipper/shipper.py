@@ -44,10 +44,15 @@ PORT_SVC = {21: "FTP", 23: "TELNET", 80: "HTTP", 3306: "MYSQL",
             3389: "RDP", 5900: "VNC", 2222: "SSH", 22: "SSH"}
 
 # URLs mit Schema aus einer Kommandozeile, plus "nackte" Hosts direkt hinter
-# einem Download-Tool (wget/curl/...), die oft ohne http:// stehen.
+# einem Download-Tool (wget/curl/...), die oft ohne http:// stehen. Das Download-
+# Segment endet am Shell-Trenner (; | & `), damit ein nachgeschobenes "sh kla.sh"
+# nicht als Host im wget-Segment landet.
 _URL_RE = re.compile(r"(?:https?|ftps?|tftp)://[^\s'\"`;|&>)<]+", re.I)
-_DLCMD_RE = re.compile(r"\b(?:wget|curl|tftp|ftpget|lwp-download|fetch)\b[^\n]*", re.I)
+_DLCMD_RE = re.compile(r"\b(?:wget|curl|tftp|ftpget|lwp-download|fetch)\b[^\n;|&`)]*", re.I)
 _HOST_RE = re.compile(r"\b([a-z0-9][a-z0-9.-]{0,252}\.[a-z]{2,24})\b", re.I)
+# Suffixe, die in diesem Kontext eine lokale Payload-Datei sind, keine Domain
+# (.sh ist zwar ccTLD, "sh kla.sh" meint aber die Datei).
+_PAYLOAD_SUFFIX = (".sh", ".bin", ".elf", ".so", ".py", ".pl", ".exe", ".bat")
 
 DEFAULTS = {
     "SENSOR_ID": "",
@@ -207,6 +212,38 @@ def _valid_domain(h):
     return tld.isalpha() and len(tld) >= 2
 
 
+def _bare_ipv4(h):
+    """Gibt die IPv4 zurueck, wenn h eine bare IPv4 ist, sonst None."""
+    try:
+        addr = ipaddress.ip_address(h)
+    except ValueError:
+        return None
+    return h if addr.version == 4 else None
+
+
+def _download_candidates(e):
+    """(host, sample_url, command)-Tripel aus einer Cowrie-Zeile. Deckt
+    file_download/-upload (url) und Shell-Kommandos (wget/curl/... plus nackte
+    Hosts hinter einem Download-Tool) ab. host kann Domain ODER bare IP sein -
+    die Trennung macht der jeweilige Parser."""
+    eid = e.get("eventid")
+    if eid in COWRIE_DL:
+        u = e.get("url")
+        return [(_host_from_url(u), u, u)] if u else []
+    if eid == COWRIE_CMD:
+        inp = e.get("input") or ""
+        cands = [(_host_from_url(u), u, inp) for u in _URL_RE.findall(inp)]
+        for seg in _DLCMD_RE.findall(inp):
+            seg = _URL_RE.sub(" ", seg)        # schon erfasste URLs rausnehmen
+            for h in _HOST_RE.findall(seg):
+                low = h.lower()
+                if low.endswith(_PAYLOAD_SUFFIX):   # lokale Payload-Datei, keine Domain
+                    continue
+                cands.append((low, h, inp))
+        return cands
+    return None
+
+
 def parse_cowrie_domains(line):
     """Download-/Nachlade-Domains aus einer Cowrie-Zeile. Gibt eine Liste von
     Domain-Events zurueck (0..n) oder None. Ein Event:
@@ -215,31 +252,42 @@ def parse_cowrie_domains(line):
         e = json.loads(line)
     except ValueError:
         return None
-    eid = e.get("eventid")
+    cands = _download_candidates(e)
+    if cands is None:
+        return None
     ip = e.get("src_ip") or ""
     ts = e.get("timestamp")
-    candidates = []                    # (host_or_url, sample_url, command)
-    if eid in COWRIE_DL:
-        u = e.get("url")
-        if u:
-            candidates.append((_host_from_url(u), u, u))
-    elif eid == COWRIE_CMD:
-        inp = e.get("input") or ""
-        for u in _URL_RE.findall(inp):
-            candidates.append((_host_from_url(u), u, inp))
-        for seg in _DLCMD_RE.findall(inp):
-            seg = _URL_RE.sub(" ", seg)        # schon erfasste URLs rausnehmen
-            for h in _HOST_RE.findall(seg):
-                candidates.append((h.lower(), h, inp))
-    else:
-        return None
     out, seen = [], set()
-    for host, sample, cmd in candidates:
+    for host, sample, cmd in cands:
         if not host or not _valid_domain(host) or host in seen:
             continue
         seen.add(host)
         out.append({"ts": ts, "src_ip": ip, "url": (sample or "")[:512],
                     "domain": host, "command": (cmd or "")[:600]})
+    return out or None
+
+
+def parse_cowrie_malware_ips(line):
+    """Nachlade-Hosts, die DIREKTE bare Public-IPs sind (kein DNS-Name), aus einer
+    Cowrie-Zeile. Die Host-IP ist das Subjekt (der Payload-Server), nicht die
+    Angreifer-IP -> Agent-Event mit reason=malware_host. is_private setzt die Intake
+    per netguard; private Hosts werden nie veroeffentlicht. 0..n Events oder None."""
+    try:
+        e = json.loads(line)
+    except ValueError:
+        return None
+    cands = _download_candidates(e)
+    if cands is None:
+        return None
+    ts = e.get("timestamp")
+    out, seen = [], set()
+    for host, sample, _cmd in cands:
+        ip = _bare_ipv4(host) if host else None
+        if not ip or ip in seen:
+            continue
+        seen.add(ip)
+        out.append({"ts": ts, "src_ip": ip, "app": "honeypot",
+                    "reason": "malware_host", "path": (sample or "")[:512]})
     return out or None
 
 
@@ -393,11 +441,14 @@ def main():
 
     # Login-/Credential-Events (IP-zentrisch) -> /events, wie bisher.
     # Nachlade-Domains aus denselben cowrie.json (eigener Offset :dom) -> /domain-events.
+    # Nachlade-Hosts, die bare Public-IPs sind (Offset :mwip) -> /agent/events
+    #   (reason=malware_host, Review-Queue; private Hosts filtert die Intake raus).
     jobs = [
         (cfg["COWRIE_LOG"], parse_cowrie, "/events", ""),
         (cfg["OC_LOG"], parse_opencanary, "/events", ""),
         (cfg["WEBDECOY_LOG"], parse_webdecoy, "/events", ""),
         (cfg["COWRIE_LOG"], parse_cowrie_domains, "/domain-events", ":dom"),
+        (cfg["COWRIE_LOG"], parse_cowrie_malware_ips, "/agent/events", ":mwip"),
     ]
     for pattern, parser, endpoint, suffix in jobs:
         for fpath in sorted(glob.glob(pattern)):
