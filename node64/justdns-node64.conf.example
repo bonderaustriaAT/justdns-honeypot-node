@@ -10,7 +10,8 @@ TOKEN=
 NODE64_URL=https://node64.lan
 # API-Key aus node64 (Einstellungen > API-Keys, Prefix node64_). Nur lesen reicht.
 NODE64_API_KEY=
-# REST-Pfad des Zugriffslogs. Leer -> der Reader probiert die ueblichen Pfade.
+# REST-Pfad des Zugriffslogs. Leer -> der Reader probiert die ueblichen Pfade
+# (Standard: /api/cdn64/log).
 NODE64_LOG_PATH=
 
 # Selbstsigniertes Zertifikat im LAN: 0. Sonst 1 (prueft Zertifikat).

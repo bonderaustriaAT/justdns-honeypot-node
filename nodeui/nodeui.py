@@ -1093,8 +1093,7 @@ input:focus,select:focus{outline:2px solid var(--blue);outline-offset:1px}
     <button class="btn" id="n6_btn" onclick="connectN6()">node64 verbinden</button>
     <div class="result" id="n6_res"></div>
     <p class="note">Den API-Key bekommst du in node64 unter <b>Einstellungen &rarr; API-Keys</b>
-    (Prefix <code>node64_</code>, nur lesen reicht). Der Key bleibt auf dieser Node. Gemeldete
-    IPs landen als Kandidaten in der Review-Queue - nichts wird automatisch veroeffentlicht.</p>
+    (Prefix <code>node64_</code>, nur lesen reicht). Der Key bleibt auf dieser Node.</p>
   </div>
 </div>
 <script>

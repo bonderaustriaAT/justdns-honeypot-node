@@ -23,6 +23,23 @@ def row(rid, client, reason, status=403, path="/"):
             "untrusted": {"path": path, "method": "GET"}}
 
 
+class RawRestShape(unittest.TestCase):
+    """Rohe /api/cdn64/log-Zeile: reason + path liegen oben (nicht rejected_reason/untrusted)."""
+    def test_raw_exploit_top_level_fields(self):
+        raw = {"id": 2904, "client": "15.207.88.3", "reason": "exploit", "status": 403,
+               "time": "2026-11-22T05:25:49Z", "host": "pw.justfuture.at",
+               "method": "GET", "path": "/.git/config", "user_agent": "x"}
+        rid, ev = nr.row_to_event(raw)
+        self.assertEqual(rid, 2904)
+        self.assertEqual(ev["src_ip"], "15.207.88.3")
+        self.assertEqual(ev["reason"], "waf_block")
+        self.assertEqual(ev["path"], "/.git/config")
+
+    def test_raw_blocklist_dropped(self):
+        self.assertIsNone(nr.row_to_event(
+            {"id": 1, "client": "1.2.3.4", "reason": "blocklist", "status": 0}))
+
+
 class Mapping(unittest.TestCase):
     def test_exploit_is_waf_block(self):
         rid, ev = nr.row_to_event(row(2904, "15.207.88.3", "exploit", 403, "/.git/config"))

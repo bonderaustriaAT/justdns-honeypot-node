@@ -54,10 +54,10 @@ DEFAULTS = {
 }
 
 # Kandidaten-Pfade fuers Zugriffslog, falls NODE64_LOG_PATH nicht gesetzt ist.
+# /api/cdn64/log ist der echte Endpunkt (Zugriffs-Log, neueste zuerst).
 LOG_PATH_CANDIDATES = (
+    "/api/cdn64/log",
     "/api/cdn64/access-log",
-    "/api/cdn64/accesslog",
-    "/api/cdn64/requests",
     "/api/proxy/access-log",
 )
 
@@ -72,6 +72,30 @@ REASON_MAP = {
 
 def log(msg):
     print(f"[node64] {msg}", file=sys.stderr)
+
+
+# Die REST-Antwort kann die Zeilen unter verschiedenen Schluesseln liefern (oder als
+# blanke Liste); ebenso den Paging-Cursor. Tolerant lesen.
+_ROW_KEYS = ("rows", "log", "entries", "data", "items", "requests", "access")
+_CURSOR_KEYS = ("next_before", "next", "before", "cursor")
+
+
+def _rows_of(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for k in _ROW_KEYS:
+            if isinstance(data.get(k), list):
+                return data[k]
+    return None
+
+
+def _cursor_of(data):
+    if isinstance(data, dict):
+        for k in _CURSOR_KEYS:
+            if data.get(k) is not None:
+                return data[k]
+    return None
 
 
 def load_config(path):
@@ -128,27 +152,38 @@ class Node64:
 
     def resolve_log_path(self, override):
         """Den funktionierenden Log-Pfad finden: override zuerst, sonst Kandidaten.
-        Ein Pfad gilt, wenn er 200 + ein Objekt mit 'rows' liefert."""
+        Ein Pfad gilt, wenn er 200 + eine Zeilen-Liste liefert (mit oder ohne Params).
+        Bei 200 mit unerwarteter Struktur die Feldnamen loggen (Diagnose, keine Werte)."""
         for p in ([override] if override else list(LOG_PATH_CANDIDATES)):
-            try:
-                status, raw = self._get(p, {"status": "rejected", "limit": 1})
-            except urllib.error.HTTPError as exc:
-                if exc.code in (401, 403):
-                    raise
-                continue
-            except (urllib.error.URLError, OSError):
-                raise
-            if status == 200:
+            for params in ({"status": "rejected", "limit": 1}, {"limit": 1}, None):
                 try:
-                    if isinstance(json.loads(raw).get("rows"), list):
-                        return p
-                except (ValueError, AttributeError):
+                    status, raw = self._get(p, params)
+                except urllib.error.HTTPError as exc:
+                    if exc.code in (401, 403):
+                        raise
+                    if exc.code == 404:
+                        break          # Pfad gibt es nicht -> naechster Pfad
+                    continue           # Params moegen nicht -> andere Params
+                except (urllib.error.URLError, OSError):
+                    raise
+                if status != 200:
                     continue
+                try:
+                    data = json.loads(raw)
+                except ValueError:
+                    continue
+                if _rows_of(data) is not None:
+                    return p
+                shape = ("Liste" if isinstance(data, list) else
+                         ("keys=" + ",".join(sorted(data.keys())) if isinstance(data, dict)
+                          else type(data).__name__))
+                log(f"Pfad {p} liefert 200, aber keine Zeilen-Liste ({shape}).")
         return None
 
     def fetch_rejected(self, path, pages, page_size, stop_after_id):
         """Abgelehnte Zeilen (neueste zuerst) holen, bis stop_after_id erreicht ist.
-        Paging ueber 'next_before'. Gibt (rows, max_id)."""
+        Paging ueber den Antwort-Cursor, sonst ueber die kleinste id der Seite als
+        'before' (node64/cdn64-Log). Gibt (rows, max_id)."""
         rows, max_id, before = [], stop_after_id, None
         for _ in range(max(1, pages)):
             params = {"status": "rejected", "limit": page_size}
@@ -161,28 +196,33 @@ class Node64:
                 data = json.loads(raw)
             except ValueError:
                 break
-            page = data.get("rows") or []
+            page = _rows_of(data) or []
             if not page:
                 break
-            done = False
+            done, page_min = False, None
             for row in page:
                 rid = row.get("id")
-                if isinstance(rid, int) and rid > max_id:
-                    max_id = rid
-                if isinstance(rid, int) and rid <= stop_after_id:
-                    done = True
-                    continue
+                if isinstance(rid, int):
+                    if rid > max_id:
+                        max_id = rid
+                    if page_min is None or rid < page_min:
+                        page_min = rid
+                    if rid <= stop_after_id:
+                        done = True
+                        continue
                 rows.append(row)
-            before = data.get("next_before")
-            if done or before is None:
+            nxt = _cursor_of(data)
+            before = nxt if nxt is not None else page_min
+            if done or before is None or len(page) < page_size:
                 break
         return rows, max_id
 
 
 def row_to_event(row):
     """node64-Logzeile -> (id, event-dict) oder None. blocklist wird verworfen
-    (Zirkularitaet). src_ip = client; Pfad/UA stehen in 'untrusted' (nur Daten)."""
-    reason_raw = row.get("rejected_reason") or ""
+    (Zirkularitaet). src_ip = client. Feldnamen je nach Quelle: rohe REST-API hat
+    reason/path oben, ueber das MCP liegen sie als rejected_reason/untrusted.path vor."""
+    reason_raw = row.get("reason") or row.get("rejected_reason") or ""
     mapped = REASON_MAP.get(reason_raw)
     if mapped is None:                      # blocklist oder unbekannt -> raus
         return None
@@ -190,8 +230,8 @@ def row_to_event(row):
     rid = row.get("id")
     if not ip or not isinstance(rid, int):
         return None
-    unt = row.get("untrusted") or {}
-    path = unt.get("path") if isinstance(unt, dict) else None
+    unt = row.get("untrusted") if isinstance(row.get("untrusted"), dict) else {}
+    path = row.get("path") or unt.get("path")
     status = row.get("status")
     status = status if isinstance(status, int) and 100 <= status <= 599 else None
     return rid, {
@@ -292,6 +332,8 @@ def main():
 
     if not events:
         log(f"keine neuen Policy-Blocks (gescannt: {len(rows)}, Pfad: {path})")
+        if rows and isinstance(rows[0], dict):   # Diagnose: Feldnamen (keine Werte)
+            log("Zeilen-Felder: " + ",".join(sorted(rows[0].keys())))
         if max_id > last_id:
             state["last_id"] = max_id
             save_state(cfg["STATE_FILE"], state)
