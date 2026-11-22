@@ -215,7 +215,7 @@ def parse_cowrie_session(line):
     ts = e.get("timestamp")
     if eid == COWRIE_SUCCESS:
         return {"kind": "login", "sid": sid, "ip": e.get("src_ip"),
-                "user": e.get("username", ""), "ts": ts,
+                "user": e.get("username", ""), "pw": e.get("password", ""), "ts": ts,
                 "proto": "TELNET" if e.get("protocol") == "telnet" else "SSH"}
     if eid == "cowrie.command.input":
         return {"kind": "cmd", "sid": sid, "ts": ts}
@@ -234,6 +234,7 @@ class State:
         self.nachlade = collections.deque(maxlen=200)   # Download-/wget-Versuche
         self.shell = collections.deque(maxlen=400)      # alle Shell-Eingaben nach Login
         self.sessions = collections.OrderedDict()       # sid -> Shell-Session-Dict
+        self.logins = collections.deque(maxlen=200)     # erfolgreiche Anmeldungen (mit Passwort)
         self.logins_ok = 0                        # erfolgreiche Anmeldungen gesamt
         self.commands_total = 0                   # abgesetzte Befehle gesamt
         self.ip_counts = {}                       # ip -> [count, last_ts]
@@ -289,12 +290,17 @@ class State:
                 if len(self.sessions) >= SESS_MAX:
                     self.sessions.popitem(last=False)   # aelteste Session faellt raus
                 self.sessions[sid] = {"ip": ev.get("ip"), "user": ev.get("user", ""),
+                                      "pw": ev.get("pw", ""),
                                       "proto": ev.get("proto"), "start_ts": ev.get("ts"),
                                       "last_ts": ev.get("ts"), "cmds": 0, "active": True}
             else:
                 s["user"] = ev.get("user") or s["user"]
+                s["pw"] = ev.get("pw") or s.get("pw", "")
                 s["active"] = True
                 s["last_ts"] = ev.get("ts") or s["last_ts"]
+            self.logins.append({"ts": ev.get("ts"), "src_ip": ev.get("ip"),
+                                "username": ev.get("user", ""), "password": ev.get("pw", ""),
+                                "proto": ev.get("proto")})
             self.logins_ok += 1
         elif kind == "cmd":
             self.commands_total += 1
@@ -337,8 +343,8 @@ class State:
             for fpath in sorted(glob.glob(COWRIE_LOG)):
                 self._read_file(fpath, parse_cowrie_session, self._add_session, "se")
             top = sorted(self.ip_counts.items(), key=lambda kv: kv[1][0], reverse=True)[:20]
-            sess = [{"sid": sid, "ip": s["ip"], "user": s["user"], "proto": s["proto"],
-                     "start_ts": s["start_ts"], "last_ts": s["last_ts"],
+            sess = [{"sid": sid, "ip": s["ip"], "user": s["user"], "pw": s.get("pw", ""),
+                     "proto": s["proto"], "start_ts": s["start_ts"], "last_ts": s["last_ts"],
                      "cmds": s["cmds"], "active": s["active"]}
                     for sid, s in self.sessions.items()]
             # aktive zuerst, dann nach letzter Aktivitaet absteigend
@@ -361,6 +367,7 @@ class State:
                 "nachlade": list(self.nachlade)[-100:][::-1],
                 "shell": list(self.shell)[-150:][::-1],
                 "sessions": sess[:40],
+                "logins": list(self.logins)[-80:][::-1],
                 "top": [{"ip": ip, "count": v[0], "last_ts": v[1]} for ip, v in top],
             }
 
@@ -1023,7 +1030,7 @@ async function tick(){
     const liveState = s.active;
     sh += '<tr>'
       + '<td class="ip" onclick="flt(\\''+esc(s.ip)+'\\')">'+esc(s.ip)+'</td>'
-      + '<td class="usr">'+esc(s.user||'-')+'</td>'
+      + '<td class="usr">'+esc(s.user||'-')+(s.pw?' <span class="pw">'+esc(s.pw)+'</span>':'')+'</td>'
       + '<td><span class="tag '+svcClass(s.proto)+'">'+esc(s.proto||'?')+'</span></td>'
       + '<td><span class="sidtag">'+esc(s.sid)+'</span></td>'
       + '<td class="mono" style="color:var(--mut)">'+esc(clockTs(s.start_ts))+'</td>'
@@ -1043,10 +1050,9 @@ async function tick(){
   }
   $('cmd').innerHTML = cx || '<div class="empty">Noch keine Befehle &middot; erscheinen, sobald ein Angreifer eingeloggt ist</div>';
 
-  // Erfolgreiche Anmeldungen
+  // Erfolgreiche Anmeldungen (eigener Puffer, nicht aus dem Fail-lastigen Feed gefiltert)
   let lg = '';
-  for(const r of (d.feed||[])){
-    if(r.outcome !== 'ok') continue;
+  for(const r of (d.logins||[])){
     lg += '<tr><td class="mono" style="white-space:nowrap"><span class="sdot" style="background:var(--green2)"></span>'+esc(clockTs(r.ts))+'</td>'
        + '<td class="ip" onclick="flt(\\''+esc(r.src_ip)+'\\')">'+esc(r.src_ip)+'</td>'
        + '<td class="mono">'+esc(r.username||'-')+' : <span class="pw">'+esc(r.password||'-')+'</span></td></tr>';
