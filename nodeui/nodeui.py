@@ -573,6 +573,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/sensors/remove":
             self._sensor_remove()
             return
+        if path == "/api/sensors/sync":
+            self._sensors_sync()
+            return
         self._send(404, {"error": "not_found"})
 
     # -- Assets + Relay + Firewall ------------------------------------------
@@ -829,6 +832,36 @@ class Handler(BaseHTTPRequestHandler):
         if fw:
             msg += " Direktanbindung abgeschaltet, der Timer fragt nichts mehr ab."
         self._send(200, {"ok": True, "message": msg})
+
+    def _run_reader(self, reader, env_key, conf_path, tag):
+        """Einen Direktanbindungs-Reader sofort laufen lassen (wie der Timer, aber
+        auf Knopfdruck). None, wenn die Anbindung nicht aktiv ist."""
+        if not os.path.exists(conf_path) or not os.path.exists(reader):
+            return None
+        env = dict(os.environ, **{env_key: conf_path})
+        try:
+            run = subprocess.run(["/usr/bin/python3", reader], env=env,
+                                 capture_output=True, text=True, timeout=90)
+            lines = [ln for ln in (run.stderr or "").splitlines() if ln.strip()]
+            return lines[-1].replace(f"[{tag}] ", "") if lines else "ok"
+        except subprocess.SubprocessError as exc:
+            return str(exc)[:160]
+
+    def _sensors_sync(self):
+        """Jetzt syncen: die aktiven Direktanbindungen (UniFi + node64) sofort
+        abfragen, statt auf den Minuten-Timer zu warten. Agents auf fremden Hosts
+        laufen ueber ihren eigenen Timer und sind hier nicht erreichbar."""
+        results = []
+        d1 = self._run_reader(UNIFI_READER, "UNIFI_CONFIG", UNIFI_CONFIG, "unifi")
+        if d1 is not None:
+            results.append({"name": "Firewall (UniFi)", "detail": d1})
+        d2 = self._run_reader(NODE64_READER, "NODE64_CONFIG", NODE64_CONFIG, "node64")
+        if d2 is not None:
+            results.append({"name": "node64", "detail": d2})
+        if not results:
+            self._send(200, {"ok": False, "message": "Keine Direktanbindung aktiv."})
+            return
+        self._send(200, {"ok": True, "results": results})
 
 
 INDEX_HTML = """<!doctype html>
@@ -1249,13 +1282,19 @@ td.act{text-align:right;padding-right:15px}
 .del{font:500 12px/1 var(--mono);color:var(--mut);background:transparent;border:1px solid var(--line2);border-radius:7px;padding:5px 10px;cursor:pointer}
 .del:hover{border-color:var(--red);color:var(--red)}
 .del:disabled{opacity:.5;cursor:default}
+.sync{font:500 12px/1 var(--mono);color:var(--blue);background:transparent;border:1px solid var(--line2);border-radius:7px;padding:5px 11px;cursor:pointer}
+.sync:hover{border-color:var(--blue)}
+.sync:disabled{opacity:.5;cursor:default}
+.syncmsg{font:12px/1 var(--mono);color:var(--dim)}
 </style></head>
 <body><div class="wrap">
   <div class="top"><span class="dot"></span><div><b>JustDNS</b> <span class="sub">honeypot node</span></div>
     <div class="nav"><a href="/">&larr; Konsole</a><a href="/setup">+ Sensor anbinden</a></div></div>
 
   <div class="card">
-    <div class="ch"><h2>Angebundene Sensoren</h2><span class="live" id="sc"></span></div>
+    <div class="ch"><h2>Angebundene Sensoren</h2><span class="live" id="sc"></span>
+      <span class="syncmsg" id="syncmsg"></span>
+      <button class="sync" id="syncbtn">Jetzt syncen</button></div>
     <div class="scroll"><table>
       <thead><tr><th>Typ</th><th>Host / Quelle</th><th>App</th><th>Sensor-ID</th><th>Meldungen</th><th>Zuletzt (Wien)</th><th></th></tr></thead>
       <tbody id="sensors"></tbody></table></div>
@@ -1315,6 +1354,16 @@ $('sensors').addEventListener('click', async e=>{
     if(!r.ok||!j.ok){ alert(j.message||'Entfernen fehlgeschlagen.'); b.disabled=false; b.textContent='Entfernen'; }
   }catch(err){ alert('Entfernen fehlgeschlagen: '+err); b.disabled=false; b.textContent='Entfernen'; }
   busy=false; tick();
+});
+$('syncbtn').addEventListener('click', async ()=>{
+  const b=$('syncbtn'), m=$('syncmsg'); b.disabled=true; const o=b.textContent; b.textContent='Sync läuft…'; m.textContent='';
+  try{
+    const r=await fetch('/api/sensors/sync',{method:'POST'});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||!j.ok){ m.textContent=j.message||'Sync fehlgeschlagen.'; }
+    else { m.textContent=(j.results||[]).map(x=>esc(x.name)+': '+esc(x.detail)).join('  ·  ')||'ok'; }
+  }catch(e){ m.textContent='Sync fehlgeschlagen'; }
+  b.disabled=false; b.textContent=o; tick();
 });
 tick(); setInterval(tick,3000);
 </script>
