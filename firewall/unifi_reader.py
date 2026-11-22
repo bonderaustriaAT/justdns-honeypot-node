@@ -344,6 +344,10 @@ def main():
 
     if not events:
         log(f"keine neuen Blocks (gescannt: {scanned})")
+        try:                                     # Lebenszeichen an die Node (zuletzt geprueft)
+            post_events(cfg["INTAKE_URL"], token, [])
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
         return 0
 
     try:

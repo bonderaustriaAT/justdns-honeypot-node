@@ -429,21 +429,26 @@ class SensorLog:
             self._save()
 
     def events(self, token, events):
-        if not events:
-            return
+        """Meldung protokollieren. Ein leerer events-Aufruf ist ein Lebenszeichen
+        des Readers (Lauf ohne neue Blocks): nur checked_ts wird gesetzt, damit
+        'zuletzt geprueft' sich bewegt, auch wenn nichts Neues kam."""
         now = _now()
         with self.lock:
             sid = self.by_token.get(token or "")
             s = self.sensors.get(sid) if sid else None
-            label = (s.get("host") or s.get("app")) if s else "?"
-            kind = s.get("kind") if s else "agent"
-            for ev in events:
-                self.feed.append({"ts": ev.get("ts") or now, "sensor": label, "kind": kind,
-                                  "src_ip": ev.get("src_ip"), "reason": ev.get("reason"),
-                                  "app": ev.get("app")})
-            if s:
-                s["last_ts"] = now
-                s["count"] = s.get("count", 0) + len(events)
+            if s is not None:
+                s["checked_ts"] = now
+            if events:
+                label = (s.get("host") or s.get("app")) if s else "?"
+                kind = s.get("kind") if s else "agent"
+                for ev in events:
+                    self.feed.append({"ts": ev.get("ts") or now, "sensor": label, "kind": kind,
+                                      "src_ip": ev.get("src_ip"), "reason": ev.get("reason"),
+                                      "app": ev.get("app")})
+                if s is not None:
+                    s["last_ts"] = now
+                    s["count"] = s.get("count", 0) + len(events)
+            if s is not None or events:
                 self._save()
 
     def remove(self, sid):
@@ -461,7 +466,8 @@ class SensorLog:
     def view(self):
         with self.lock:
             sensors = sorted(self.sensors.values(),
-                             key=lambda x: x.get("last_ts", ""), reverse=True)
+                             key=lambda x: x.get("checked_ts") or x.get("last_ts", ""),
+                             reverse=True)
             return {"sensors": sensors, "feed": list(self.feed)[-200:][::-1]}
 
 
@@ -626,6 +632,9 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             events = []
         SENSORS.events(tok, events)
+        if not events:                        # Lebenszeichen: nichts weiterzuleiten
+            self._send(200, {"accepted": 0, "duplicate": 0, "heartbeat": True})
+            return
         try:
             status, raw = forward_events(events)
             self._send(status, raw.decode("utf-8", "replace"))
@@ -1296,7 +1305,7 @@ td.act{text-align:right;padding-right:15px}
       <span class="syncmsg" id="syncmsg"></span>
       <button class="sync" id="syncbtn">Jetzt syncen</button></div>
     <div class="scroll"><table>
-      <thead><tr><th>Typ</th><th>Host / Quelle</th><th>App</th><th>Sensor-ID</th><th>Meldungen</th><th>Zuletzt (Wien)</th><th></th></tr></thead>
+      <thead><tr><th>Typ</th><th>Host / Quelle</th><th>App</th><th>Sensor-ID</th><th>Meldungen</th><th>Zuletzt geprueft (Wien)</th><th></th></tr></thead>
       <tbody id="sensors"></tbody></table></div>
   </div>
 
@@ -1325,7 +1334,7 @@ async function tick(){
       +`<td class="mono">${esc(s.app)||'<span class="muted">-</span>'}</td>`
       +`<td class="mono muted">${esc(s.sensor_id)}</td>`
       +`<td class="mono">${s.count||0}</td>`
-      +`<td class="mono muted">${esc(ts(s.last_ts))}</td>`
+      +`<td class="mono muted">${esc(ts(s.checked_ts||s.last_ts))}</td>`
       +`<td class="act"><button class="del" data-sid="${esc(s.sensor_id)}" data-host="${esc(s.host||s.app||s.sensor_id)}">Entfernen</button></td></tr>`;
   }
   $('sensors').innerHTML = h || '<tr><td colspan="7" class="empty">Noch keine Sensoren angebunden. Unter &bdquo;+ Sensor anbinden&ldquo; einen Agent ausrollen oder die Firewall verbinden.</td></tr>';

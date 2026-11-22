@@ -336,6 +336,10 @@ def main():
         log(f"keine neuen Policy-Blocks (gescannt: {len(rows)}, Pfad: {path})")
         if rows and isinstance(rows[0], dict):   # Diagnose: Feldnamen (keine Werte)
             log("Zeilen-Felder: " + ",".join(sorted(rows[0].keys())))
+        try:                                     # Lebenszeichen an die Node (zuletzt geprueft)
+            post_events(cfg["INTAKE_URL"], token, [])
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
         if max_id > last_id:
             state["last_id"] = max_id
             save_state(cfg["STATE_FILE"], state)
