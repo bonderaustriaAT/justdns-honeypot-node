@@ -1052,7 +1052,7 @@ input:focus,select:focus{outline:2px solid var(--blue);outline-offset:1px}
     <div class="row">
       <div class="f"><label>Host-Name (LXC / VM)</label><input id="ag_name" placeholder="web-02" oninput="buildAgent()"></div>
       <div class="f sm"><label>Anwendung</label><select id="ag_app" onchange="buildAgent()">
-        <option>nginx</option><option>apache</option><option>caddy</option><option>node64</option>
+        <option>nginx</option><option>apache</option><option>caddy</option>
         <option>npm</option><option>haproxy</option><option>sshd</option><option>fail2ban</option></select></div>
     </div>
     <div class="cmd"><code id="ag_cmd"></code><button class="copy" onclick="cp('ag_cmd',this)">Kopieren</button></div>

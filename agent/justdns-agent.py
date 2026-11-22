@@ -20,7 +20,7 @@ und Logpfad ebenso. Nur Standardbibliothek. Als systemd-Timer/Service ausrollbar
 Config (Env ODER Datei via --config, KEY=VALUE je Zeile):
   INTAKE_URL     Pflicht, z.B. https://intake.justdns.justfuture.at
   TOKEN          Pflicht. Von /agent/register (UI) ausgegeben.
-  APP            Pflicht. nginx|caddy|node64|npm|apache|haproxy|sshd|fail2ban
+  APP            Pflicht. nginx|caddy|npm|apache|haproxy|sshd|fail2ban
   HOST           optional, Label fuers Dashboard (LXC/VM-Name).
   LOG_GLOB       optional. Leer -> App-Default (siehe PROFILES).
   REJECT_STATUS  optional, HTTP-Status die als Ablehnung zaehlen.
@@ -55,7 +55,6 @@ DEFAULT_GLOBS = {
     "nginx": "/var/log/nginx/access.log*",
     "apache": "/var/log/apache2/access.log*",
     "caddy": "/var/log/caddy/access.log*",
-    "node64": "/var/log/node64/access.log*",
     "npm": "/data/logs/proxy-host-*_access.log*",
     "haproxy": "/var/log/haproxy.log*",
     "sshd": "/var/log/auth.log*",
@@ -228,7 +227,6 @@ PROFILES = {
     "nginx": _parse_combined,
     "apache": _parse_combined,
     "caddy": _parse_json_access,
-    "node64": _parse_json_access,
     "npm": _parse_npm,
     "haproxy": _parse_haproxy,
     "sshd": _parse_sshd,

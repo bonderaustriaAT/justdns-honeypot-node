@@ -8,7 +8,8 @@ INTAKE_URL=https://intake.justdns.justfuture.at
 # pro Agent revozierbar). Pflicht.
 TOKEN=
 
-# App-Profil. Eines von: nginx caddy node64 npm apache haproxy sshd fail2ban
+# App-Profil. Eines von: nginx caddy npm apache haproxy sshd fail2ban
+# (node64 wird NICHT getailt - es hat die eigene Direktanbindung im nodeui.)
 APP=nginx
 
 # LXC/VM-Name fuers Dashboard (optional, Anzeige).

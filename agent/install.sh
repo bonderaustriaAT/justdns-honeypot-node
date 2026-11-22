@@ -3,7 +3,7 @@
 #
 # Wird vom in der Node-UI generierten Befehl aufgerufen:
 #   curl -fsSL http://<node>:8090/agent/install | sudo bash -s -- \
-#       --name <lxc> --app <nginx|caddy|node64|npm|apache|haproxy|sshd|fail2ban> \
+#       --name <lxc> --app <nginx|caddy|npm|apache|haproxy|sshd|fail2ban> \
 #       [--intake-url <url>] [--log-glob <glob>]
 #
 # Laedt den Agent von der Node, registriert sich selbst (kein Token noetig),
@@ -39,7 +39,7 @@ done
 command -v python3 >/dev/null 2>&1 || die "python3 nicht gefunden."
 command -v systemctl >/dev/null 2>&1 || die "systemd nicht gefunden."
 case "$APP" in
-    nginx|caddy|node64|npm|apache|haproxy|sshd|fail2ban) : ;;
+    nginx|caddy|npm|apache|haproxy|sshd|fail2ban) : ;;
     *) die "--app '$APP' nicht unterstuetzt." ;;
 esac
 

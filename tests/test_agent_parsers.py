@@ -49,8 +49,8 @@ class Parsers(unittest.TestCase):
             '{"request":{"remote_ip":"8.8.8.8","uri":"/"},"status":200}')
         self.assertIsNone(ok)
 
-    def test_node64_json_remote_addr_with_port(self):
-        rej = self.p("node64",
+    def test_json_remote_addr_with_port(self):
+        rej = self.p("caddy",
             '{"request":{"remote_addr":"91.196.70.222:51234","uri":"/admin"},"status":401}')
         self.assertEqual(rej["src_ip"], "91.196.70.222")
         self.assertEqual(rej["status_code"], 401)

@@ -19,8 +19,9 @@ blockierte Zugriffe) und schickt die Quell-IP an die Intake. Versand at-least-on
 ueber Byte-Offsets: Offsets ruecken erst nach erfolgreichem POST vor, bei
 Intake-Ausfall bleibt alles liegen und geht beim naechsten Lauf raus.
 
-Unterstuetzte Profile: `nginx`, `apache`, `caddy`, `node64`, `npm`, `haproxy`,
-`sshd`, `fail2ban`.
+Unterstuetzte Profile: `nginx`, `apache`, `caddy`, `npm`, `haproxy`, `sshd`,
+`fail2ban`. node64 wird nicht getailt (kein Datei-Log) - es hat die eigene
+Direktanbindung im nodeui (*node64 anbinden*).
 
 ### Installieren
 
@@ -71,8 +72,9 @@ requests) and sends the source IP to the Intake. At-least-once over byte offsets
 offsets advance only after a successful POST, so nothing is lost if the Intake is
 down - it goes out on the next run.
 
-Supported profiles: `nginx`, `apache`, `caddy`, `node64`, `npm`, `haproxy`,
-`sshd`, `fail2ban`.
+Supported profiles: `nginx`, `apache`, `caddy`, `npm`, `haproxy`, `sshd`,
+`fail2ban`. node64 is not tailed (no file log) - it has its own direct
+connection in the nodeui (*node64 anbinden*).
 
 ### Install
 
