@@ -239,10 +239,12 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    for req_key in ("INTAKE_URL", "NODE64_URL", "NODE64_API_KEY"):
-        if not cfg[req_key]:
-            log(f"{req_key} erforderlich.")
-            return 2
+    if not cfg["NODE64_URL"] or not cfg["NODE64_API_KEY"]:
+        log("node64 nicht angebunden (URL/API-Key fehlen) - nichts zu tun.")
+        return 0
+    if not cfg["INTAKE_URL"]:
+        log("INTAKE_URL erforderlich.")
+        return 2
 
     token, sid = ensure_token(cfg)
     if not token:
