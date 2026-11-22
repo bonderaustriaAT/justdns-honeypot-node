@@ -1,0 +1,11 @@
+[Unit]
+Description=JustDNS node64-Reader alle 60s
+
+[Timer]
+OnBootSec=55s
+OnUnitActiveSec=60s
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

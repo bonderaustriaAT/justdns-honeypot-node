@@ -1,0 +1,22 @@
+# JustDNS node64-Reader (nur lesen) - /etc/justdns-node64.conf (0640 root:root).
+
+# Ziel: die Honeypot-Node (die leitet an die Intake weiter). Bei Direktanbindung
+# ueber die Node-UI wird das automatisch auf http://127.0.0.1:<port> gesetzt.
+INTAKE_URL=https://intake.justdns.justfuture.at
+# Sensor-Token. Leer -> Reader registriert sich beim ersten Lauf selbst
+# (kind=firewall) und muss danach im Dashboard freigegeben werden.
+TOKEN=
+
+NODE64_URL=https://node64.lan
+# API-Key aus node64 (Einstellungen > API-Keys, Prefix node64_). Nur lesen reicht.
+NODE64_API_KEY=
+# REST-Pfad des Zugriffslogs. Leer -> der Reader probiert die ueblichen Pfade.
+NODE64_LOG_PATH=
+
+# Selbstsigniertes Zertifikat im LAN: 0. Sonst 1 (prueft Zertifikat).
+VERIFY_TLS=1
+
+NAME=node64
+# Seiten je Lauf (je 100 Zeilen). 20 deckt auch einen Rueckstand ab.
+PAGES=20
+STATE_FILE=/var/lib/justdns-firewall/node64-state.json

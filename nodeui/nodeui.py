@@ -67,6 +67,11 @@ FW_DIR = os.environ.get("NODEUI_FW_DIR", "/var/lib/justdns-firewall")
 UNIFI_CONFIG = os.environ.get("NODEUI_UNIFI_CONFIG", os.path.join(FW_DIR, "unifi.conf"))
 UNIFI_READER = os.environ.get("NODEUI_UNIFI_READER", "/opt/justdns-firewall/unifi_reader.py")
 FW_STATE = os.environ.get("NODEUI_FW_STATE", os.path.join(FW_DIR, "connect.json"))
+# node64-Direktanbindung (PROXY64/CDN64-Zugriffslog, nur lesen): gleiche Mechanik
+# wie die Firewall - Config im nodeui-schreibbaren Verzeichnis, Timer beim Deploy.
+NODE64_CONFIG = os.environ.get("NODEUI_NODE64_CONFIG", os.path.join(FW_DIR, "node64.conf"))
+NODE64_READER = os.environ.get("NODEUI_NODE64_READER", "/opt/justdns-firewall/node64_reader.py")
+NODE64_STATE = os.environ.get("NODEUI_NODE64_STATE", os.path.join(FW_DIR, "node64-connect.json"))
 # Identitaet DIESER Honeypot-Node an der Intake (aus der Shipper-Config): Agents und
 # Firewall melden lokal an die Node, ihre IPs gehen unter dieser Node-Identitaet raus.
 SHIPPER_CONFIG = os.environ.get("NODEUI_SHIPPER_CONFIG", "/etc/justdns-shipper.conf")
@@ -347,9 +352,9 @@ def mint_local(host, app, kind):
             "token": "loc_" + secrets.token_hex(16)}
 
 
-def register_firewall(name):
+def register_firewall(name, app="unifi"):
     """Firewall-Sensor LOKAL anlegen (kein Intake-Sensor); Token + ID zurueck."""
-    reg = mint_local(name, "unifi", "firewall")
+    reg = mint_local(name, app, "firewall")
     return reg["token"], reg["sensor_id"]
 
 
@@ -504,6 +509,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/firewall/status":
             self._send(200, self._fw_status())
             return
+        if path == "/api/node64/status":
+            self._send(200, self._n64_status())
+            return
         if path == "/healthz":
             self._send(200, {"status": "ok"})
             return
@@ -522,6 +530,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/firewall/connect":
             self._fw_connect()
+            return
+        if path == "/api/node64/connect":
+            self._n64_connect()
             return
         self._send(404, {"error": "not_found"})
 
@@ -671,6 +682,89 @@ class Handler(BaseHTTPRequestHandler):
                 lines = [ln for ln in (run.stderr or "").splitlines() if ln.strip()]
                 if lines:
                     detail = lines[-1].replace("[unifi] ", "")
+            except subprocess.SubprocessError as exc:
+                detail = str(exc)[:160]
+        return detail
+
+    def _n64_status(self):
+        info = {"connected": os.path.exists(NODE64_CONFIG)}
+        try:
+            with open(NODE64_STATE, encoding="utf-8") as fh:
+                info.update(json.load(fh))
+        except (OSError, ValueError):
+            pass
+        return info
+
+    def _n64_connect(self):
+        try:
+            d = json.loads(self._body() or b"{}")
+        except ValueError:
+            self._send(400, {"ok": False, "message": "Ungueltige Anfrage."})
+            return
+        url = (d.get("node64_url") or "").strip().rstrip("/")
+        key = (d.get("api_key") or "").strip()
+        verify = bool(d.get("verify_tls", True))
+        log_path = (d.get("log_path") or "").strip()
+        if not url or not key:
+            self._send(400, {"ok": False, "message": "node64-URL und API-Key noetig."})
+            return
+        name = urllib.parse.urlparse(url).hostname or "node64"
+        try:
+            token, sid = register_firewall(name, app="node64")
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            self._send(200, {"ok": False,
+                             "message": f"Anmeldung an der Intake fehlgeschlagen: {str(exc)[:160]}"})
+            return
+        if not token:
+            self._send(200, {"ok": False, "message": "Intake lieferte kein Token."})
+            return
+        SENSORS.register({"host": name, "app": "node64", "kind": "firewall"},
+                         {"token": token, "sensor_id": sid})
+        try:
+            detail = self._n64_install(url, key, verify, log_path, name, token, sid)
+        except (OSError, subprocess.SubprocessError) as exc:
+            self._send(200, {"ok": False, "message": f"Einrichtung fehlgeschlagen: {str(exc)[:200]}"})
+            return
+        # Der Reader meldet im Fehlerfall klartext (Auth/Endpunkt). Das als Status zeigen.
+        low = (detail or "").lower()
+        if "fehlgeschlagen" in low or "nicht gefunden" in low or "nicht erreichbar" in low:
+            self._send(200, {"ok": False, "message": detail or "node64 nicht erreichbar."})
+            return
+        msg = "node64 verbunden. Policy-Blocks (ohne Blocklist) gehen jede Minute in die Review-Queue."
+        if detail:
+            msg += " " + detail
+        self._send(200, {"ok": True, "sensor_id": sid, "node64": url, "message": msg})
+
+    def _n64_install(self, url, key, verify, log_path, name, token, sid):
+        """Config schreiben und den Reader einmal sofort laufen lassen (kein root)."""
+        state_file = os.path.join(FW_DIR, "node64-state.json")
+        os.makedirs(FW_DIR, exist_ok=True)
+        conf = (
+            f"INTAKE_URL=http://127.0.0.1:{PORT}\n"
+            f"TOKEN={token}\n"
+            f"NODE64_URL={url}\n"
+            f"NODE64_API_KEY={key}\n"
+            f"NODE64_LOG_PATH={log_path}\n"
+            f"VERIFY_TLS={'1' if verify else '0'}\n"
+            f"NAME={name}\n"
+            f"STATE_FILE={state_file}\n"
+            "PAGES=20\n"
+        )
+        fd = os.open(NODE64_CONFIG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(conf)
+        with open(NODE64_STATE, "w", encoding="utf-8") as fh:
+            json.dump({"node64": url, "sensor_id": sid, "verify_tls": verify,
+                       "connected_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}, fh)
+        detail = ""
+        if os.path.exists(NODE64_READER):
+            env = dict(os.environ, NODE64_CONFIG=NODE64_CONFIG)
+            try:
+                run = subprocess.run(["/usr/bin/python3", NODE64_READER], env=env,
+                                     capture_output=True, text=True, timeout=90)
+                lines = [ln for ln in (run.stderr or "").splitlines() if ln.strip()]
+                if lines:
+                    detail = lines[-1].replace("[node64] ", "")
             except subprocess.SubprocessError as exc:
                 detail = str(exc)[:160]
         return detail
@@ -983,6 +1077,25 @@ input:focus,select:focus{outline:2px solid var(--blue);outline-offset:1px}
     Control Plane &rarr; Integrations</b> (am besten unter einem Viewer-Admin). Der Key bleibt
     auf dieser Node und wird nicht an die Intake gesendet.</p>
   </div>
+
+  <div class="card">
+    <h2>node64 anbinden (PROXY64, nur lesen)</h2>
+    <p class="d">Diese Node liest das node64-Zugriffslog und holt die <b>eigenen</b> Policy-Blocks
+    (Exploit-/WAF-Treffer, Access-List, Rate-Limit, honeypot_instant_block). Blocklist-Treffer
+    werden bewusst ausgelassen (die stehen schon auf der Liste). Nur lesend.</p>
+    <div class="row">
+      <div class="f"><label>node64-URL</label><input id="n6_url" placeholder="https://node64.lan"></div>
+    </div>
+    <div class="row">
+      <div class="f"><label>API-Key (node64_...)</label><input id="n6_key" type="password" autocomplete="off" placeholder="node64_..."></div>
+    </div>
+    <label class="chk"><input type="checkbox" id="n6_tls" checked> Selbstsigniertes Zertifikat (TLS-Pruefung aus)</label>
+    <button class="btn" id="n6_btn" onclick="connectN6()">node64 verbinden</button>
+    <div class="result" id="n6_res"></div>
+    <p class="note">Den API-Key bekommst du in node64 unter <b>Einstellungen &rarr; API-Keys</b>
+    (Prefix <code>node64_</code>, nur lesen reicht). Der Key bleibt auf dieser Node. Gemeldete
+    IPs landen als Kandidaten in der Review-Queue - nichts wird automatisch veroeffentlicht.</p>
+  </div>
 </div>
 <script>
 const esc = s => (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -1015,6 +1128,23 @@ async function connectFw(){
     else res('err','&#10007; '+esc(d.message||'Fehlgeschlagen.'));
   }catch(e){ res('err','Netzwerkfehler: '+esc(String(e))); }
   btn.disabled=false; btn.textContent='Firewall verbinden';
+}
+function res6(cls,msg){ const r=$('n6_res'); r.className='result show '+cls; r.innerHTML=msg; }
+async function connectN6(){
+  const url=($('n6_url').value||'').trim();
+  const key=($('n6_key').value||'').trim();
+  const verify=!$('n6_tls').checked;
+  if(!url||!key){ res6('err','node64-URL und API-Key noetig.'); return; }
+  const btn=$('n6_btn'); btn.disabled=true; btn.textContent='Verbinde...';
+  res6('wait','node64 wird getestet und angemeldet...');
+  try{
+    const r=await fetch('/api/node64/connect',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({node64_url:url,api_key:key,verify_tls:verify})});
+    const d=await r.json();
+    if(d.ok){ res6('ok','&#10003; '+esc(d.message)); $('n6_key').value=''; }
+    else res6('err','&#10007; '+esc(d.message||'Fehlgeschlagen.'));
+  }catch(e){ res6('err','Netzwerkfehler: '+esc(String(e))); }
+  btn.disabled=false; btn.textContent='node64 verbinden';
 }
 buildAgent();
 </script>
@@ -1150,8 +1280,35 @@ def reconcile_firewall():
             SENSORS._save()
 
 
+def reconcile_node64():
+    """Eine schon eingerichtete node64-Anbindung ins Protokoll uebernehmen."""
+    try:
+        with open(NODE64_CONFIG, encoding="utf-8") as fh:
+            conf = {}
+            for ln in fh:
+                ln = ln.strip()
+                if ln and not ln.startswith("#") and "=" in ln:
+                    k, v = ln.split("=", 1)
+                    conf[k.strip()] = v.strip()
+    except OSError:
+        return
+    token = conf.get("TOKEN", "")
+    try:
+        with open(NODE64_STATE, encoding="utf-8") as fh:
+            st = json.load(fh)
+    except (OSError, ValueError):
+        st = {}
+    sid = st.get("sensor_id")
+    if not token or not sid:
+        return
+    name = conf.get("NAME") or st.get("node64") or "node64"
+    SENSORS.register({"host": name, "app": "node64", "kind": "firewall"},
+                     {"token": token, "sensor_id": sid})
+
+
 def main():
     reconcile_firewall()
+    reconcile_node64()
     httpd = ThreadingHTTPServer((BIND, PORT), Handler)
     print(f"[nodeui] lauscht auf {BIND}:{PORT}", flush=True)
     try:
