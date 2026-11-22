@@ -38,6 +38,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import ssl
 import subprocess
 import threading
@@ -66,6 +67,9 @@ FW_DIR = os.environ.get("NODEUI_FW_DIR", "/var/lib/justdns-firewall")
 UNIFI_CONFIG = os.environ.get("NODEUI_UNIFI_CONFIG", os.path.join(FW_DIR, "unifi.conf"))
 UNIFI_READER = os.environ.get("NODEUI_UNIFI_READER", "/opt/justdns-firewall/unifi_reader.py")
 FW_STATE = os.environ.get("NODEUI_FW_STATE", os.path.join(FW_DIR, "connect.json"))
+# Identitaet DIESER Honeypot-Node an der Intake (aus der Shipper-Config): Agents und
+# Firewall melden lokal an die Node, ihre IPs gehen unter dieser Node-Identitaet raus.
+SHIPPER_CONFIG = os.environ.get("NODEUI_SHIPPER_CONFIG", "/etc/justdns-shipper.conf")
 
 COWRIE_FAILED = "cowrie.login.failed"
 COWRIE_SUCCESS = "cowrie.login.success"
@@ -300,20 +304,53 @@ def _http(url, data=None, headers=None, method=None, timeout=20, ctx=None):
         return resp.status, resp.read()
 
 
-def relay(path, body, auth):
-    """Sensor-Call unveraendert an die zentrale Intake weiterreichen."""
-    headers = {"Content-Type": "application/json"}
-    if auth:
-        headers["Authorization"] = auth
-    return _http(INTAKE_URL + path, data=body, headers=headers, method="POST")
+_NODE = {"url": INTAKE_URL, "token": os.environ.get("NODEUI_NODE_TOKEN", "")}
+
+
+def node_target():
+    """Intake-URL + Node-Token (own-honeypot-131) aus der Shipper-Config. Agent-
+    und Firewall-IPs melden unter DIESER Honeypot-Node-Identitaet, nicht einzeln."""
+    if _NODE["token"]:
+        return _NODE["url"], _NODE["token"]
+    try:
+        with open(SHIPPER_CONFIG, encoding="utf-8") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if ln.startswith("#") or "=" not in ln:
+                    continue
+                k, v = ln.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if k == "TOKEN":
+                    _NODE["token"] = v
+                elif k == "INTAKE_URL":
+                    _NODE["url"] = v.rstrip("/")
+    except OSError:
+        pass
+    return _NODE["url"], _NODE["token"]
+
+
+def forward_events(events):
+    """Gesammelte Agent-/Firewall-IPs unter der Node-Identitaet an die Intake melden."""
+    url, token = node_target()
+    if not token:
+        raise OSError("kein Node-Token (Shipper-Config fehlt)")
+    body = json.dumps({"events": events}).encode("utf-8")
+    return _http(url + "/agent/events", data=body, method="POST",
+                 headers={"Content-Type": "application/json",
+                          "Authorization": f"Bearer {token}"})
+
+
+def mint_local(host, app, kind):
+    """Lokales Sensor-Token: der Sensor gehoert zur Node, nicht zur Intake."""
+    base = (app or kind or "sensor")[:12]
+    return {"sensor_id": f"{base}-{secrets.token_hex(4)}",
+            "token": "loc_" + secrets.token_hex(16)}
 
 
 def register_firewall(name):
-    """Firewall-Sensor an der Intake anmelden, Token zurueck (ueber Relay)."""
-    body = json.dumps({"host": name, "app": "unifi", "kind": "firewall"}).encode("utf-8")
-    _status, raw = relay("/agent/register", body, None)
-    data = json.loads(raw)
-    return data.get("token"), data.get("sensor_id")
+    """Firewall-Sensor LOKAL anlegen (kein Intake-Sensor); Token + ID zurueck."""
+    reg = mint_local(name, "unifi", "firewall")
+    return reg["token"], reg["sensor_id"]
 
 
 def controller_probe(url, site, key, verify):
@@ -477,8 +514,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(401, {"error": "unauthorized"})
             return
         path = urllib.parse.urlparse(self.path).path
-        if path in ("/agent/register", "/agent/events"):
-            self._relay(path)
+        if path == "/agent/register":
+            self._agent_register()
+            return
+        if path == "/agent/events":
+            self._agent_events()
             return
         if path == "/api/firewall/connect":
             self._fw_connect()
@@ -510,29 +550,36 @@ class Handler(BaseHTTPRequestHandler):
             txt = txt.replace("https://intake.justdns.justfuture.at", self._node_base())
         self._send(200, txt, ctype=ctype)
 
-    def _relay(self, path):
-        """Sensor-Meldung an die zentrale Intake weiterreichen (transparent) und
-        fuers lokale Protokoll mitschreiben."""
+    def _agent_register(self):
+        """Agent/Firewall LOKAL registrieren: der Sensor gehoert zur Node, nicht
+        zur Intake. Node vergibt Token selbst, kein Intake-Sensor pro Agent."""
+        try:
+            d = json.loads(self._body() or b"{}")
+        except ValueError:
+            d = {}
+        reg = mint_local(d.get("host", ""), d.get("app", ""), d.get("kind", "agent"))
+        SENSORS.register(d, reg)
+        self._send(200, {"token": reg["token"], "sensor_id": reg["sensor_id"],
+                         "status": "local"})
+
+    def _agent_events(self):
+        """Meldung lokal protokollieren und die IPs unter der Node-Identitaet
+        (own-honeypot-131) an die zentrale Intake weiterleiten."""
         body = self._body()
         auth = self.headers.get("Authorization", "")
+        tok = auth[7:] if auth.startswith("Bearer ") else ""
         try:
-            status, raw = relay(path, body, auth or None)
+            events = json.loads(body or b"{}").get("events", [])
+        except ValueError:
+            events = []
+        SENSORS.events(tok, events)
+        try:
+            status, raw = forward_events(events)
+            self._send(status, raw.decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
             self._send(exc.code, exc.read().decode("utf-8", "replace"))
-            return
         except (urllib.error.URLError, OSError) as exc:
             self._send(502, {"error": "intake_unreachable", "detail": str(exc)[:200]})
-            return
-        if status < 300:
-            try:
-                if path.endswith("/register"):
-                    SENSORS.register(json.loads(body or b"{}"), json.loads(raw or b"{}"))
-                elif path.endswith("/events"):
-                    tok = auth[7:] if auth.startswith("Bearer ") else ""
-                    SENSORS.events(tok, json.loads(body or b"{}").get("events", []))
-            except (ValueError, AttributeError):
-                pass
-        self._send(status, raw.decode("utf-8", "replace"))
 
     def _fw_status(self):
         info = {"connected": os.path.exists(UNIFI_CONFIG)}
@@ -915,8 +962,6 @@ input:focus,select:focus{outline:2px solid var(--blue);outline-offset:1px}
         <option>npm</option><option>haproxy</option><option>sshd</option><option>fail2ban</option></select></div>
     </div>
     <div class="cmd"><code id="ag_cmd"></code><button class="copy" onclick="cp('ag_cmd',this)">Kopieren</button></div>
-    <p class="note">Kein Token noetig - der Agent registriert sich selbst an dieser Node. Seine
-    oeffentlichen IPs erscheinen danach in der Intake-Review-Queue zur <b>Freigabe</b>.</p>
   </div>
 
   <div class="card">
@@ -1068,7 +1113,45 @@ tick(); setInterval(tick,3000);
 </body></html>"""
 
 
+def reconcile_firewall():
+    """Eine schon eingerichtete Firewall-Anbindung ins Protokoll uebernehmen,
+    damit sie auch nach einem Neustart oder nach einem Update sichtbar ist."""
+    try:
+        with open(UNIFI_CONFIG, encoding="utf-8") as fh:
+            conf = {}
+            for ln in fh:
+                ln = ln.strip()
+                if ln and not ln.startswith("#") and "=" in ln:
+                    k, v = ln.split("=", 1)
+                    conf[k.strip()] = v.strip()
+    except OSError:
+        return
+    token = conf.get("TOKEN", "")
+    try:
+        with open(FW_STATE, encoding="utf-8") as fh:
+            st = json.load(fh)
+    except (OSError, ValueError):
+        st = {}
+    sid = st.get("sensor_id")
+    if not token or not sid:
+        return
+    name = conf.get("NAME") or st.get("controller") or "unifi"
+    SENSORS.register({"host": name, "app": "unifi", "kind": "firewall"},
+                     {"token": token, "sensor_id": sid})
+    try:
+        with open(os.path.join(FW_DIR, "unifi-state.json"), encoding="utf-8") as fh:
+            cnt = len(json.load(fh).get("seen_ids", []))
+    except (OSError, ValueError):
+        cnt = 0
+    with SENSORS.lock:
+        s = SENSORS.sensors.get(sid)
+        if s and not s.get("count"):
+            s["count"] = cnt
+            SENSORS._save()
+
+
 def main():
+    reconcile_firewall()
     httpd = ThreadingHTTPServer((BIND, PORT), Handler)
     print(f"[nodeui] lauscht auf {BIND}:{PORT}", flush=True)
     try:
