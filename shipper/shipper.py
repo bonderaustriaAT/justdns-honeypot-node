@@ -119,6 +119,8 @@ def parse_cowrie(line):
         e = json.loads(line)
     except ValueError:
         return None
+    if not isinstance(e, dict):
+        return None
     if e.get("eventid") not in COWRIE_LOGIN:
         return None
     ip = e.get("src_ip")
@@ -138,6 +140,8 @@ def parse_opencanary(line):
     try:
         e = json.loads(line)
     except ValueError:
+        return None
+    if not isinstance(e, dict):
         return None
     try:
         if int(e.get("logtype", 0)) < 2000:
@@ -166,6 +170,8 @@ def parse_webdecoy(line):
     try:
         e = json.loads(line)
     except ValueError:
+        return None
+    if not isinstance(e, dict):
         return None
     ip = e.get("src_ip")
     if not ip:
@@ -214,6 +220,8 @@ def parse_cowrie_domains(line):
     try:
         e = json.loads(line)
     except ValueError:
+        return None
+    if not isinstance(e, dict):
         return None
     eid = e.get("eventid")
     ip = e.get("src_ip") or ""
